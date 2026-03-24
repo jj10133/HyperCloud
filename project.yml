@@ -8,8 +8,10 @@ packages:
 targets:
   App:
     type: application
-    platform: iOS
-    deploymentTarget: 18.4
+    supportedDestinations: [iOS, macOS]
+    deploymentTarget:
+      iOS: "16.0"
+      macOS: "11.0"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios
@@ -19,14 +21,14 @@ targets:
     entitlements:
       path: app/App.entitlements
       properties:
-        aps-environment: development
-        com.apple.security.application-groups:
-          - group.to.holepunch.bare.ios
+        # aps-environment: development
+        # com.apple.security.application-groups:
+          # - group.to.holepunch.bare.ios
         com.apple.security.cs.allow-jit: true
     dependencies:
       - framework: app/frameworks/BareKit.xcframework
       - package: BareKit
-      - target: NotificationServiceExtension
+      # - target: NotificationServiceExtension
     sources:
       - path: app/App.swift
       - path: app/app.js
@@ -37,46 +39,52 @@ targets:
         - name: Link
           script: |
             PATH="${PATH}" "${PWD}/node_modules/.bin/bare-link" \
-              --preset ios \
+              --host darwin-arm64 \
+              --host ios-arm64 \
+              --host ios-arm64-simulator \
               --out ${PWD}/app/addons \
               ${PWD}
         - name: Pack
           script: |
             PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
-              --preset ios \
+              --host darwin-arm64 \
+              --host ios-arm64 \
+              --host ios-arm64-simulator \
               --base ${PWD} \
               --out ${PWD}/app/app.bundle \
               ${PWD}/app/app.js
-            PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
-              --preset ios \
-              --base ${PWD} \
-              --out ${PWD}/app/push.bundle \
-              ${PWD}/app/push.js
-  NotificationServiceExtension:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: 14.0
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios.NotificationServiceExtension
-        SWIFT_VERSION: 5.0
-    info:
-      path: app/NotificationServiceExtension.Info.plist
-      properties:
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.usernotifications.service
-          NSExtensionPrincipalClass: NotificationServiceExtension.NotificationService
-    entitlements:
-      path: app/NotificationServiceExtension.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - group.to.holepunch.bare.ios
-        com.apple.developer.usernotifications.filtering: true
-    dependencies:
-      - framework: app/frameworks/BareKit.xcframework
-      - package: BareKit
-    sources:
-      - path: app/NotificationService.swift
-      - path: app/push.js
-      - path: app/push.bundle
-        optional: true
+
+            # PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
+            #   --preset ios \
+            #   --base ${PWD} \
+            #   --out ${PWD}/app/push.bundle \
+            #   ${PWD}/app/push.js
+
+  # NotificationServiceExtension:
+  #   type: app-extension
+  #   platform: iOS
+  #   deploymentTarget: 14.0
+  #   settings:
+  #     base:
+  #       PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios.NotificationServiceExtension
+  #       SWIFT_VERSION: 5.0
+  #   info:
+  #     path: app/NotificationServiceExtension.Info.plist
+  #     properties:
+  #       NSExtension:
+  #         NSExtensionPointIdentifier: com.apple.usernotifications.service
+  #         NSExtensionPrincipalClass: NotificationServiceExtension.NotificationService
+  #   entitlements:
+  #     path: app/NotificationServiceExtension.entitlements
+  #     properties:
+  #       com.apple.security.application-groups:
+  #         - group.to.holepunch.bare.ios
+  #       com.apple.developer.usernotifications.filtering: true
+  #   dependencies:
+  #     - framework: app/frameworks/BareKit.xcframework
+  #     - package: BareKit
+  #   sources:
+  #     - path: app/NotificationService.swift
+  #     - path: app/push.js
+  #     - path: app/push.bundle
+  #       optional: true

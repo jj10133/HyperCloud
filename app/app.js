@@ -1,1 +1,1 @@
-console.log(Bare)
+console.log("bare side")

@@ -1,74 +1,78 @@
 import BareKit
 import SwiftUI
-import UserNotifications
+//import UserNotifications
 
 @main
 struct App: SwiftUI.App {
-  @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-  private var worklet = Worklet()
-
-  @Environment(\.scenePhase) private var scenePhase
-
-  var body: some Scene {
-    WindowGroup {
-      ContentView()
-        .onAppear {
-          worklet.start(name: "app", ofType: "bundle")
-
-          requestPushNotificationPermission()
+    //  @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    private var worklet = Worklet()
+    @State private var isWorkletStarted = false
+    
+    @Environment(\.scenePhase) private var scenePhase
+    
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .onAppear {
+                    worklet.start(name: "app", ofType: "bundle")
+                    isWorkletStarted = true
+                    
+                    //          requestPushNotificationPermission()
+                }
+                .onDisappear {
+                    worklet.terminate()
+                }
         }
-        .onDisappear {
-          worklet.terminate()
+        .onChange(of: scenePhase) { phase in
+            guard isWorkletStarted else { return }
+            
+            switch phase {
+            case .background:
+                worklet.suspend()
+            case .active:
+                worklet.resume()
+            default:
+                break
+            }
         }
     }
-    .onChange(of: scenePhase) { phase in
-      switch phase {
-      case .background:
-        worklet.suspend()
-      case .active:
-        worklet.resume()
-      default:
-        break
-      }
-    }
-  }
-
-  private func requestPushNotificationPermission() {
-    let center = UNUserNotificationCenter.current()
-
-    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-      if let error = error {
-        print("\(error.localizedDescription)")
-      } else if granted {
-        DispatchQueue.main.async {
-          UIApplication.shared.registerForRemoteNotifications()
-        }
-      } else {
-        print("Notification authorization denied")
-      }
-    }
-  }
+    
+    //  private func requestPushNotificationPermission() {
+    //    let center = UNUserNotificationCenter.current()
+    //
+    //    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+    //      if let error = error {
+    //        print("\(error.localizedDescription)")
+    //      } else if granted {
+    //        DispatchQueue.main.async {
+    //          UIApplication.shared.registerForRemoteNotifications()
+    //        }
+    //      } else {
+    //        print("Notification authorization denied")
+    //      }
+    //    }
+    //  }
 }
 
-class AppDelegate: NSObject, UIApplicationDelegate {
-  func application(
-    _ application: UIApplication,
-    didRegisterForRemoteNotificationsWithDeviceToken token: Data
-  ) {
-    print("Token: \(token.map { String(format: "%02x", $0) }.joined())")
-  }
-
-  func application(
-    _ application: UIApplication,
-    didFailToRegisterForRemoteNotificationsWithError error: Error
-  ) {
-    print("\(error.localizedDescription)")
-  }
-}
+//class AppDelegate: NSObject, UIApplicationDelegate {
+//  func application(
+//    _ application: UIApplication,
+//    didRegisterForRemoteNotificationsWithDeviceToken token: Data
+//  ) {
+//    print("Token: \(token.map { String(format: "%02x", $0) }.joined())")
+//  }
+//
+//  func application(
+//    _ application: UIApplication,
+//    didFailToRegisterForRemoteNotificationsWithError error: Error
+//  ) {
+//    print("\(error.localizedDescription)")
+//  }
+//}
 
 struct ContentView: View {
-  var body: some View {
-    Text("Hello SwiftUI!")
-  }
+    var body: some View {
+        Text("Hello SwiftUI!")
+    }
 }

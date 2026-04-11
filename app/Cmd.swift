@@ -1,3 +1,11 @@
+//
+//  Cmd.swift
+//  App
+//
+//  Created by Janardhan on 2026-04-11.
+//
+
+
 import Foundation
 
 // Must mirror commands.js exactly — same integer values.

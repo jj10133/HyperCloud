@@ -1,9 +1,12 @@
-name: App
+name: HyperCloud
 include:
   - app/addons/addons.yml
 packages:
   BareKit:
     url: https://github.com/holepunchto/bare-kit-swift
+    branch: main
+  BareRPC:
+    url: https://github.com/holepunchto/bare-rpc-swift
     branch: main
 targets:
   App:
@@ -16,6 +19,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios
         SWIFT_VERSION: 5.0
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: '-'
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGNING_ALLOWED: NO
+          VALIDATE_PRODUCT: NO
+          VALIDATE_WORKSPACE: NO
+          OTHER_CODE_SIGN_FLAGS: '--deep --no-strict'
+        Release:
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: 'Apple Development'
+          CODE_SIGNING_REQUIRED: YES
+          VALIDATE_PRODUCT: YES
     info:
       path: app/Info.plist
     entitlements:
@@ -28,12 +45,29 @@ targets:
     dependencies:
       - framework: app/frameworks/BareKit.xcframework
       - package: BareKit
+      - package: BareRPC
       # - target: NotificationServiceExtension
     sources:
       - path: app/App.swift
       - path: app/app.js
       - path: app/app.bundle
         optional: true
+
+      - path: app/commands.js
+      - path: app/store.js
+      - path: app/space.js
+
+      - path: app/Cmd.swift
+      - path: app/NewSpaceView.swift
+      - path: app/SpaceDetailView.swift
+      - path: app/MenuBarView.swift
+      - path: app/Worker+Events.swift
+      - path: app/Worker.swift
+      - path: app/IPCBridge.swift
+      - path: app/Space.swift
+      - path: app/SpacesListView.swift
+
+
     scheme:
       preActions:
         - name: Link
@@ -50,42 +84,9 @@ targets:
               --host darwin-arm64 \
               --host ios-arm64 \
               --host ios-arm64-simulator \
+              --linked \
               --base ${PWD} \
-              --linked
               --out ${PWD}/app/app.bundle \
               ${PWD}/app/app.js
 
-            # PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
-            #   --preset ios \
-            #   --base ${PWD} \
-            #   --out ${PWD}/app/push.bundle \
-            #   ${PWD}/app/push.js
 
-  # NotificationServiceExtension:
-  #   type: app-extension
-  #   platform: iOS
-  #   deploymentTarget: 14.0
-  #   settings:
-  #     base:
-  #       PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios.NotificationServiceExtension
-  #       SWIFT_VERSION: 5.0
-  #   info:
-  #     path: app/NotificationServiceExtension.Info.plist
-  #     properties:
-  #       NSExtension:
-  #         NSExtensionPointIdentifier: com.apple.usernotifications.service
-  #         NSExtensionPrincipalClass: NotificationServiceExtension.NotificationService
-  #   entitlements:
-  #     path: app/NotificationServiceExtension.entitlements
-  #     properties:
-  #       com.apple.security.application-groups:
-  #         - group.to.holepunch.bare.ios
-  #       com.apple.developer.usernotifications.filtering: true
-  #   dependencies:
-  #     - framework: app/frameworks/BareKit.xcframework
-  #     - package: BareKit
-  #   sources:
-  #     - path: app/NotificationService.swift
-  #     - path: app/push.js
-  #     - path: app/push.bundle
-  #       optional: true

@@ -1,3 +1,13 @@
 targets:
   App:
-    dependencies: []
+    dependencies:
+      - framework: bare-fs.4.7.0.xcframework
+      - framework: bare-inspect.3.1.4.xcframework
+      - framework: bare-os.3.8.7.xcframework
+      - framework: bare-pipe.4.0.4.xcframework
+      - framework: bare-subprocess.6.0.0.xcframework
+      - framework: bare-type.1.1.0.xcframework
+      - framework: bare-url.2.4.0.xcframework
+      - framework: rabin-native.2.0.0.xcframework
+      - framework: sodium-native.5.1.0.xcframework
+      - framework: udx-native.1.19.2.xcframework

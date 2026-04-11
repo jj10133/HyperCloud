@@ -1,9 +1,10 @@
 import Foundation
 import SwiftUI
+import BareRPC
 
 extension Worker {
 
-    func handleEvent(_ event: RPCEvent) {
+    func handleEvent(_ event: IncomingEvent) {
         guard let raw  = event.data,
               let dict = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         else { return }
@@ -12,7 +13,7 @@ extension Worker {
 
         case Cmd.ready:
             let raw = dict["spaces"] as? [[String: Any]] ?? []
-            let loaded = raw.map { DriftSpace(from: $0) }
+            let loaded = raw.map { Space(from: $0) }
             DispatchQueue.main.async {
                 self.spaces = loaded
                 self.ready  = true

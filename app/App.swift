@@ -1,78 +1,26 @@
 import BareKit
 import SwiftUI
-//import UserNotifications
 
 @main
 struct App: SwiftUI.App {
-    //  @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
-    private var worklet = Worklet()
-    @State private var isWorkletStarted = false
-    
+    @StateObject private var worker = Worker()
     @Environment(\.scenePhase) private var scenePhase
     
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .onAppear {
-                    worklet.start(name: "app", ofType: "bundle")
-                    isWorkletStarted = true
-                    
-                    //          requestPushNotificationPermission()
-                }
-                .onDisappear {
-                    worklet.terminate()
-                }
+        MenuBarExtra {
+            MenuBarView()
+                .environmentObject(worker)
+        } label: {
+            Label("HyperCloud", systemImage: worker.ready ? "externaldrive.fill.badge.icloud" : "clock")
         }
-        .onChange(of: scenePhase) { phase in
-            guard isWorkletStarted else { return }
-            
-            switch phase {
-            case .background:
-                worklet.suspend()
-            case .active:
-                worklet.resume()
-            default:
-                break
+        .menuBarExtraStyle(.window)
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            switch newPhase {
+            case .background: worker.suspend()
+            case .active:     worker.resume()
+            default: break
             }
         }
-    }
-    
-    //  private func requestPushNotificationPermission() {
-    //    let center = UNUserNotificationCenter.current()
-    //
-    //    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-    //      if let error = error {
-    //        print("\(error.localizedDescription)")
-    //      } else if granted {
-    //        DispatchQueue.main.async {
-    //          UIApplication.shared.registerForRemoteNotifications()
-    //        }
-    //      } else {
-    //        print("Notification authorization denied")
-    //      }
-    //    }
-    //  }
-}
-
-//class AppDelegate: NSObject, UIApplicationDelegate {
-//  func application(
-//    _ application: UIApplication,
-//    didRegisterForRemoteNotificationsWithDeviceToken token: Data
-//  ) {
-//    print("Token: \(token.map { String(format: "%02x", $0) }.joined())")
-//  }
-//
-//  func application(
-//    _ application: UIApplication,
-//    didFailToRegisterForRemoteNotificationsWithError error: Error
-//  ) {
-//    print("\(error.localizedDescription)")
-//  }
-//}
-
-struct ContentView: View {
-    var body: some View {
-        Text("Hello SwiftUI!")
     }
 }

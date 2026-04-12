@@ -1,11 +1,10 @@
 'use strict'
 
 const Localdrive = require('localdrive')
-const Localwatch = require('localwatch')
+const watchDrive = require('watch-drive')
 const Protomux   = require('protomux')
 const c          = require('compact-encoding')
 const crypto     = require('hypercore-crypto')
-const fs         = require('bare-fs')
 const path       = require('bare-path')
 const store      = require('./store')
 
@@ -27,7 +26,7 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map() // noiseKeyHex → { channel, msgs }
+    this._peers  = new Map()
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
@@ -42,8 +41,6 @@ class Space {
     console.log('[space] attachMux', this.name, peerId)
 
     const self = this
-
-    // msgs object — populated after addMessage calls below
     const msgs = {}
 
     const channel = mux.createChannel({
@@ -57,7 +54,7 @@ class Space {
           spaceId: self.id, peerId: id, peers: self._peers.size
         })
 
-        // both sides send manifest on open
+        // send our manifest on open
         const files = await self._buildManifest()
         console.log('[space] sending manifest', files.length, 'files to', peerId)
         msgs.manifest.send(files)
@@ -88,7 +85,6 @@ class Space {
         for (const their of theirFiles) {
           const mine = myMap.get(their.key)
           if (!mine || their.mtime > mine.mtime) {
-            // send a want for this file
             console.log('[space] want', their.key, 'from', peerId)
             msgs.want.send(their.key)
           }
@@ -96,16 +92,14 @@ class Space {
       }
     })
 
-    // msg 1: file data — { key, data (base64) }
+    // msg 1: file — { key, data (base64) }
     msgs.file = channel.addMessage({
       encoding: jsonEnc,
       async onmessage ({ key, data: b64 }) {
         const buf = Buffer.from(b64, 'base64')
-        const abs = path.join(self._folder, key)
         console.log('[space] recv file', key, buf.length, 'bytes from', peerId)
         try {
-          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
-          await fs.promises.writeFile(abs, buf)
+          await self._local.put(key, buf)
           self._emit('space:changed', {
             spaceId: self.id, type: 'update', key, peers: self._peers.size
           })
@@ -115,14 +109,13 @@ class Space {
       }
     })
 
-    // msg 2: delete
+    // msg 2: del — key string
     msgs.del = channel.addMessage({
       encoding: c.string,
       async onmessage (key) {
-        const abs = path.join(self._folder, key)
         console.log('[space] recv del', key, 'from', peerId)
         try {
-          await fs.promises.unlink(abs)
+          await self._local.del(key)
           self._emit('space:changed', {
             spaceId: self.id, type: 'delete', key, peers: self._peers.size
           })
@@ -132,16 +125,14 @@ class Space {
       }
     })
 
-    // msg 3: want — peer requests a file by key
+    // msg 3: want — peer requests a specific file
     msgs.want = channel.addMessage({
       encoding: c.string,
       async onmessage (key) {
-        console.log('[space] peer wants', key, 'from', peerId)
-        const abs = path.join(self._folder, key)
+        console.log('[space] peer wants', key)
         try {
-          const data = await fs.promises.readFile(abs)
-          msgs.file.send({ key, data: data.toString('base64') })
-          console.log('[space] sent', key, 'to', peerId)
+          const buf = await self._local.get(key)
+          if (buf) msgs.file.send({ key, data: buf.toString('base64') })
         } catch (err) {
           console.log('[space] want failed', key, err.message)
         }
@@ -155,15 +146,11 @@ class Space {
     const files = []
     try {
       for await (const entry of this._local.list('/')) {
-        const abs = path.join(this._folder, entry.key)
-        try {
-          const stat = await fs.promises.stat(abs)
-          files.push({
-            key:   entry.key,
-            mtime: stat.mtimeMs,
-            hash:  entry.value?.blob?.hash?.toString('hex') || ''
-          })
-        } catch {}
+        files.push({
+          key:   entry.key,
+          mtime: entry.mtime || 0,
+          hash:  entry.value?.blob?.hash?.toString('hex') || ''
+        })
       }
     } catch (err) {
       console.log('[space] manifest error:', err.message)
@@ -174,25 +161,23 @@ class Space {
   startWatching () {
     if (this._watch || this.paused) return
     console.log('[space] watching', this._folder)
-    this._watch = new Localwatch(this._folder, {
-      filter: (filename) => Localwatch.defaultFilter(filename)
-    })
+    this._watch = watchDrive(this._local)
     this._consumeWatch()
   }
 
   async _consumeWatch () {
-    for await (const diff of this._watch) {
+    for await (const { diff } of this._watch) {
       if (this.paused) continue
-      for (const { type, filename } of diff) {
-        const rel = path.relative(this._folder, filename)
-        const key = '/' + rel.split(path.sep).join('/')
-        console.log('[space] local change:', type, key, 'peers:', this._peers.size)
+
+      for (const { type, key } of diff) {
+        console.log('[space] change:', type, key, 'peers:', this._peers.size)
 
         try {
           if (type === 'update') {
-            const data = await fs.promises.readFile(filename)
+            const buf = await this._local.get(key)
+            if (!buf) continue
             for (const [, peer] of this._peers) {
-              peer.msgs.file.send({ key, data: data.toString('base64') })
+              peer.msgs.file.send({ key, data: buf.toString('base64') })
             }
           } else if (type === 'delete') {
             for (const [, peer] of this._peers) {
@@ -211,7 +196,10 @@ class Space {
   }
 
   stopWatching () {
-    if (this._watch) { this._watch.destroy(); this._watch = null }
+    if (this._watch) {
+      this._watch.destroy()
+      this._watch = null
+    }
   }
 
   pause ()  { this.paused = true;  this.stopWatching() }

@@ -26,8 +26,8 @@ const {
 
 class Drift {
   constructor () {
-    this.spaces  = new Map() // id → Space
-    this._topics = new Map() // topicHex → Space
+    this.spaces  = new Map()
+    this._topics = new Map()
     this.swarm   = null
     this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
@@ -42,46 +42,39 @@ class Drift {
 
     this.swarm.on('connection', (conn, info) => {
       const noiseKey   = info.publicKey.toString('hex')
-      const topicHexes = (info.topics || []).map(t => t.toString('hex'))
-      const discHex    = info.discoveryKey ? info.discoveryKey.toString('hex') : null
+      const topics     = info.topics || []
+      const peerTopics = info.peer?.topics || []
 
-      console.log('[drift] connection noise:', noiseKey.slice(0, 8),
-        'topics:', topicHexes.map(t => t.slice(0, 8)),
-        'disc:', discHex ? discHex.slice(0, 8) : 'none')
+      // combine all topic sources
+      const allTopics = [...new Set([
+        ...topics.map(t => t.toString('hex')),
+        ...peerTopics.map(t => t.toString('hex')),
+        ...(info.discoveryKey ? [info.discoveryKey.toString('hex')] : [])
+      ])]
+
+      console.log('[drift] connection noise:', noiseKey.slice(0, 8), 'all topics:', allTopics.map(t => t.slice(0, 8)))
 
       conn.on('error', (err) => console.log('[drift] conn error:', err.message))
 
-      // initiator side — info.topics is populated
-      if (topicHexes.length > 0) {
-        for (const hex of topicHexes) {
-          const space = this._topics.get(hex)
-          if (space) {
-            console.log('[drift] routing to space:', space.name, '(initiator)')
-            space.addPeer(conn, info, true)
-            return
-          }
-        }
-      }
+      const isInitiator = topics.length > 0
 
-      // responder side — use discoveryKey which equals the topic
-      if (discHex) {
-        const space = this._topics.get(discHex)
+      // find matching space from any topic source
+      for (const hex of allTopics) {
+        const space = this._topics.get(hex)
         if (space) {
-          console.log('[drift] routing to space:', space.name, '(responder)')
-          space.addPeer(conn, info, false)
+          console.log('[drift] routing to space:', space.name, isInitiator ? '(initiator)' : '(responder)')
+          space.addPeer(conn, info, isInitiator)
           return
         }
       }
 
-      console.log('[drift] no space found for connection')
+      console.log('[drift] no space found — known topics:', [...this._topics.keys()].map(k => k.slice(0, 8)))
     })
 
-    // register all spaces first
     const saved = store.loadSpaces()
     console.log('[drift] loading', saved.length, 'saved spaces')
     for (const opts of saved) this._registerSpace(opts)
 
-    // join swarm for all spaces at once
     const discoveries = []
     for (const space of this.spaces.values()) {
       const d = this.swarm.join(space.topic(), { server: true, client: true })

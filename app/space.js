@@ -8,6 +8,12 @@ const fs         = require('bare-fs')
 const path       = require('bare-path')
 const store      = require('./store')
 
+// peer protocol commands
+const CMD_MANIFEST = 1
+const CMD_GET      = 2
+const CMD_PUT      = 3
+const CMD_DEL      = 4
+
 class Space {
   constructor (opts, emit) {
     this.id     = opts.id
@@ -54,21 +60,20 @@ class Space {
       spaceId: this.id, peerId: id, peers: this._peers.size
     })
 
-    // only initiator starts the sync to avoid both sides requesting at once
     if (isInitiator) this._syncWithPeer(id)
   }
 
   async _onRequest (req) {
     switch (req.command) {
 
-      case 1: { // manifest
+      case CMD_MANIFEST: {
         const manifest = await this._buildManifest()
         console.log('[space] sending manifest:', manifest.length, 'files')
         req.reply(Buffer.from(JSON.stringify(manifest)))
         break
       }
 
-      case 2: { // get
+      case CMD_GET: {
         const key = req.data.toString()
         const abs = path.join(this._folder, key)
         console.log('[space] peer GET', key)
@@ -80,7 +85,7 @@ class Space {
         break
       }
 
-      case 3: { // put
+      case CMD_PUT: {
         const { key, data: b64 } = JSON.parse(req.data.toString())
         const buf = Buffer.from(b64, 'base64')
         const abs = path.join(this._folder, key)
@@ -99,7 +104,7 @@ class Space {
         break
       }
 
-      case 4: { // del
+      case CMD_DEL: {
         const key = req.data.toString()
         const abs = path.join(this._folder, key)
         console.log('[space] peer DEL', key)
@@ -120,14 +125,23 @@ class Space {
     }
   }
 
+  // wrap bare-rpc request in a promise
+  _request (rpc, command, data) {
+    return new Promise((resolve, reject) => {
+      const req = rpc.request(command)
+      req.on('response', (res) => resolve(res.data))
+      req.on('error', reject)
+      req.send(data)
+    })
+  }
+
   async _syncWithPeer (peerId) {
     console.log('[space] syncing with', peerId.slice(0, 8))
     const rpc = this._peers.get(peerId)
     if (!rpc) { console.log('[space] peer gone'); return }
 
     try {
-      // get their manifest
-      const raw        = await rpc.request(1).send(Buffer.alloc(0))
+      const raw        = await this._request(rpc, CMD_MANIFEST, Buffer.alloc(0))
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')
 
@@ -138,7 +152,7 @@ class Space {
         const mine = myMap.get(their.key)
         if (!mine || their.mtime > mine.mtime) {
           console.log('[space] pulling', their.key)
-          const data = await rpc.request(2).send(Buffer.from(their.key))
+          const data = await this._request(rpc, CMD_GET, Buffer.from(their.key))
           if (data && data.length > 0) {
             const abs = path.join(this._folder, their.key)
             await fs.promises.mkdir(path.dirname(abs), { recursive: true })
@@ -196,7 +210,7 @@ class Space {
             const data = await fs.promises.readFile(filename)
             for (const [id, rpc] of this._peers) {
               try {
-                await rpc.request(3).send(Buffer.from(
+                await this._request(rpc, CMD_PUT, Buffer.from(
                   JSON.stringify({ key, data: data.toString('base64') })
                 ))
                 console.log('[space] pushed', key, 'to', id.slice(0, 8))
@@ -207,7 +221,7 @@ class Space {
           } else if (type === 'delete') {
             for (const [id, rpc] of this._peers) {
               try {
-                await rpc.request(4).send(Buffer.from(key))
+                await this._request(rpc, CMD_DEL, Buffer.from(key))
                 console.log('[space] del pushed to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] del failed to', id.slice(0, 8), err.message)

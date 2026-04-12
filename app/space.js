@@ -20,14 +20,13 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map() // noiseKeyHex → { mux, rpc }
+    this._peers  = new Map()
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
   topic () { return this._topic }
 
-  // mux is a Protomux instance shared across all spaces on this connection
   addPeer (mux, info) {
     const id = info.publicKey.toString('hex')
     if (this._peers.has(id)) return
@@ -36,25 +35,14 @@ class Space {
 
     let rpc
     try {
-      // each space opens its own named channel on the shared mux
-      // protocol includes space id so channels don't collide across spaces
       rpc = new RPC(mux, {
         protocol: 'drift/sync',
         id: Buffer.from(this.id)
       })
     } catch (err) {
-      // channel already open or rejected — this space isn't shared with this peer
       console.log('[space] channel rejected for', this.name, err.message)
       return
     }
-
-    rpc.on('close', () => {
-      console.log('[space] rpc closed for', this.name, id.slice(0, 8))
-      this._peers.delete(id)
-      this._emit('peer:disconnected', {
-        spaceId: this.id, peerId: id, peers: this._peers.size
-      })
-    })
 
     rpc.respond('manifest', async () => {
       const manifest = await this._buildManifest()
@@ -106,14 +94,37 @@ class Space {
       return Buffer.alloc(0)
     })
 
-    this._peers.set(id, { mux, rpc })
-    console.log('[space] peer added, total:', this._peers.size)
+    // wait for open event before considering peer connected
+    // if remote doesn't open the same channel it will fire close instead
+    rpc.once('open', () => {
+      console.log('[space] channel open for', this.name, id.slice(0, 8))
 
-    this._emit('peer:connected', {
-      spaceId: this.id, peerId: id, peers: this._peers.size
+      this._peers.set(id, { mux, rpc })
+      console.log('[space] peer added, total:', this._peers.size)
+
+      this._emit('peer:connected', {
+        spaceId: this.id, peerId: id, peers: this._peers.size
+      })
+
+      this._syncWithPeer(id)
     })
 
-    this._syncWithPeer(id)
+    rpc.once('close', () => {
+      if (!this._peers.has(id)) {
+        // closed before open — remote didn't have this space
+        console.log('[space] channel rejected (no matching space on remote):', this.name)
+        return
+      }
+      console.log('[space] peer disconnected', this.name, id.slice(0, 8))
+      this._peers.delete(id)
+      this._emit('peer:disconnected', {
+        spaceId: this.id, peerId: id, peers: this._peers.size
+      })
+    })
+
+    mux.stream.on('error', (err) => {
+      console.log('[space] conn error', id.slice(0, 8), err.message)
+    })
   }
 
   async _syncWithPeer (peerId) {
@@ -122,9 +133,6 @@ class Space {
     if (!peer) { console.log('[space] peer gone'); return }
 
     try {
-      // wait for channel to be fully open before requesting
-      await peer.rpc.fullyOpened()
-
       const raw        = await peer.rpc.request('manifest', Buffer.alloc(0))
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')

@@ -1,201 +1,299 @@
 'use strict'
 
-const Hyperswarm = require('hyperswarm')
-const crypto     = require('hypercore-crypto')
-const { spawn }  = require('bare-subprocess')
+const Localdrive = require('localdrive')
+const Localwatch = require('localwatch')
 const RPC        = require('bare-rpc')
+const crypto     = require('hypercore-crypto')
+const fs         = require('bare-fs')
+const path       = require('bare-path')
+const store      = require('./store')
 
-const store    = require('./store')
-const Space    = require('./space')
-const commands = require('./commands')
+const PEER_MANIFEST = 1
+const PEER_GET      = 2
+const PEER_PUT      = 3
+const PEER_DEL      = 4
 
-const {
-  CMD_GET_SPACES,
-  CMD_CREATE_SPACE,
-  CMD_JOIN_SPACE,
-  CMD_DELETE_SPACE,
-  CMD_GET_SPACE_KEY,
-  CMD_OPEN_FOLDER,
-  CMD_PAUSE_SPACE,
-  CMD_RESUME_SPACE,
-  CMD_READY,
-  CMD_SPACE_CHANGED,
-  CMD_PEER_CONNECTED,
-  CMD_PEER_DISCONNECTED
-} = commands
+class Space {
+  constructor (opts, emit) {
+    this.id     = opts.id
+    this.name   = opts.name
+    this.key    = Buffer.from(opts.key, 'hex')
+    this.paused = opts.paused || false
 
-class Drift {
-  constructor () {
-    this.spaces  = new Map() // id → Space
-    this._topics = new Map() // topicHex → Space
-    this.swarm   = null
-    this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
+    this._emit   = emit
+    this._folder = store.ensureSpaceFolder(this.name)
+    this._topic  = crypto.hash(this.key)
+    this._local  = new Localdrive(this._folder)
+    this._watch  = null
+    this._peers  = new Map()
 
-    this._init()
+    console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
-  // ── Boot ──────────────────────────────────────────────────────────────────
+  topic () {
+    return this._topic
+  }
 
-  async _init () {
-    store.init()
+  addPeer (conn, info) {
+    const id = info.publicKey.toString('hex').slice(0, 8)
+    console.log('[space] addPeer', this.name, 'peer:', id)
 
-    this.swarm = new Hyperswarm()
-    this.swarm.on('connection', (conn, info) => this._onConnection(conn, info))
-
-    for (const saved of store.loadSpaces()) {
-      await this._loadSpace(saved)
+    if (this._peers.has(id)) {
+      console.log('[space] peer already connected, skipping')
+      return
     }
 
-    this._emit(CMD_READY, { spaces: this._spacesJSON() })
+    const rpc = new RPC(conn, (req) => this._onPeerRequest(req))
+
+    conn.on('close', () => {
+      console.log('[space] peer disconnected', id)
+      this._peers.delete(id)
+      this._emit('peer:disconnected', {
+        spaceId: this.id,
+        peerId:  id,
+        peers:   this._peers.size
+      })
+    })
+
+    conn.on('error', (err) => {
+      console.log('[space] conn error', id, err.message)
+    })
+
+    this._peers.set(id, { conn, rpc })
+    console.log('[space] peer added, total peers:', this._peers.size)
+
+    this._emit('peer:connected', {
+      spaceId: this.id,
+      peerId:  id,
+      peers:   this._peers.size
+    })
+
+    this._syncWithPeer(id)
   }
 
-  // ── Connection routing ────────────────────────────────────────────────────
-
-  _onConnection (conn, info) {
-    conn.on('error', () => {})
-
-    // initiator side — info.topics is populated
-    if (info.topics && info.topics.length > 0) {
-      for (const t of info.topics) {
-        const space = this._topics.get(t.toString('hex'))
-        if (space) { space.addPeer(conn, info); return }
-      }
-    }
-
-    // responder side — match via discoveryKey
-    if (info.discoveryKey) {
-      const space = this._topics.get(info.discoveryKey.toString('hex'))
-      if (space) { space.addPeer(conn, info); return }
-    }
-
-    // single space fallback
-    if (this.spaces.size === 1) {
-      const space = [...this.spaces.values()][0]
-      space.addPeer(conn, info)
-    }
+  peerCount () {
+    return this._peers.size
   }
 
-  // ── Space lifecycle ───────────────────────────────────────────────────────
-
-  async _loadSpace (opts) {
-    const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
-    this.spaces.set(space.id, space)
-    this._topics.set(space.topic().toString('hex'), space)
-
-    const discovery = this.swarm.join(space.topic(), { server: true, client: true })
-    await discovery.flushed()
-
-    space.startWatching()
-    return space
-  }
-
-  async _createSpace (name) {
-    const key  = crypto.randomBytes(32)
-    const id   = crypto.randomBytes(16).toString('hex')
-    const opts = { id, name, key: key.toString('hex'), paused: false }
-    store.addSpace(opts)
-    return this._loadSpace(opts)
-  }
-
-  async _joinSpace (name, keyHex) {
-    const id   = crypto.randomBytes(16).toString('hex')
-    const opts = { id, name, key: keyHex, paused: false }
-    store.addSpace(opts)
-    return this._loadSpace(opts)
-  }
-
-  async _deleteSpace (id) {
-    const space = this.spaces.get(id)
-    if (!space) return
-    this._topics.delete(space.topic().toString('hex'))
-    this.spaces.delete(id)
-    await space.destroy()
-    store.removeSpace(id)
-  }
-
-  // ── Space events → Swift ──────────────────────────────────────────────────
-
-  _onSpaceEvent (event, data) {
-    if (event === 'space:changed')          this._emit(CMD_SPACE_CHANGED, data)
-    else if (event === 'peer:connected')    this._emit(CMD_PEER_CONNECTED, data)
-    else if (event === 'peer:disconnected') this._emit(CMD_PEER_DISCONNECTED, data)
-  }
-
-  // ── Swift → JS requests ───────────────────────────────────────────────────
-
-  _onRequest (req) {
-    if (req.command === undefined) return
-
-    const body  = req.data ? JSON.parse(req.data.toString()) : {}
-    const reply = (err, data) => {
-      if (err) return req.reply(Buffer.from(JSON.stringify({ error: err.message })))
-      req.reply(Buffer.from(JSON.stringify(data || {})))
-    }
+  async _onPeerRequest (req) {
+    console.log('[space] peer request command:', req.command)
 
     switch (req.command) {
 
-      case CMD_GET_SPACES:
-        return reply(null, { spaces: this._spacesJSON() })
-
-      case CMD_CREATE_SPACE:
-        return this._createSpace(body.name)
-          .then(s  => reply(null, s.toJSON()))
-          .catch(e => reply(e))
-
-      case CMD_JOIN_SPACE:
-        return this._joinSpace(body.name, body.key)
-          .then(s  => reply(null, s.toJSON()))
-          .catch(e => reply(e))
-
-      case CMD_DELETE_SPACE:
-        return this._deleteSpace(body.id)
-          .then(() => reply(null))
-          .catch(e  => reply(e))
-
-      case CMD_GET_SPACE_KEY: {
-        const space = this.spaces.get(body.id)
-        if (!space) return reply(new Error('space not found'))
-        return reply(null, { key: space.key.toString('hex') })
+      case PEER_MANIFEST: {
+        console.log('[space] building manifest for peer')
+        const manifest = await this._buildManifest()
+        console.log('[space] manifest has', manifest.length, 'files')
+        req.reply(Buffer.from(JSON.stringify(manifest)))
+        break
       }
 
-      case CMD_OPEN_FOLDER: {
-        const space = this.spaces.get(body.id)
-        if (!space) return reply(new Error('space not found'))
-        spawn('open', [space._folder], { detached: true })
-        return reply(null)
+      case PEER_GET: {
+        const key = req.data.toString()
+        console.log('[space] peer GET', key)
+        const abs = path.join(this._folder, key)
+        try {
+          const data = await fs.promises.readFile(abs)
+          console.log('[space] sending', data.length, 'bytes for', key)
+          req.reply(data)
+        } catch (err) {
+          console.log('[space] GET failed', key, err.message)
+          req.reply(Buffer.alloc(0))
+        }
+        break
       }
 
-      case CMD_PAUSE_SPACE: {
-        const space = this.spaces.get(body.id)
-        if (!space) return reply(new Error('space not found'))
-        space.pause()
-        store.saveSpaces([...this.spaces.values()].map(s => s.toJSON()))
-        return reply(null)
+      case PEER_PUT: {
+        const { key, data: b64 } = JSON.parse(req.data.toString())
+        const data = Buffer.from(b64, 'base64')
+        console.log('[space] peer PUT', key, data.length, 'bytes')
+        const abs = path.join(this._folder, key)
+        try {
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+          await fs.promises.writeFile(abs, data)
+          console.log('[space] wrote', key)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'update', key, peers: this._peers.size
+          })
+        } catch (err) {
+          console.log('[space] PUT failed', key, err.message)
+        }
+        req.reply(Buffer.alloc(0))
+        break
       }
 
-      case CMD_RESUME_SPACE: {
-        const space = this.spaces.get(body.id)
-        if (!space) return reply(new Error('space not found'))
-        space.resume()
-        store.saveSpaces([...this.spaces.values()].map(s => s.toJSON()))
-        return reply(null)
+      case PEER_DEL: {
+        const key = req.data.toString()
+        console.log('[space] peer DEL', key)
+        const abs = path.join(this._folder, key)
+        try {
+          await fs.promises.unlink(abs)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'delete', key, peers: this._peers.size
+          })
+        } catch (err) {
+          console.log('[space] DEL failed', key, err.message)
+        }
+        req.reply(Buffer.alloc(0))
+        break
       }
 
       default:
-        return reply(new Error('unknown command'))
+        console.log('[space] unknown peer command', req.command)
+        req.reply(Buffer.alloc(0))
     }
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  async _syncWithPeer (peerId) {
+    console.log('[space] starting initial sync with', peerId)
+    const peer = this._peers.get(peerId)
+    if (!peer) {
+      console.log('[space] peer gone before sync started')
+      return
+    }
 
-  _emit (command, data) {
-    const payload = data ? Buffer.from(JSON.stringify(data)) : Buffer.alloc(0)
-    this.rpc.event(command, payload)
+    try {
+      const raw        = await peer.rpc.request(PEER_MANIFEST, Buffer.alloc(0))
+      const theirFiles = JSON.parse(raw.toString())
+      console.log('[space] peer has', theirFiles.length, 'files')
+
+      const myManifest = await this._buildManifest()
+      const myMap      = new Map(myManifest.map(f => [f.key, f]))
+
+      for (const their of theirFiles) {
+        const mine = myMap.get(their.key)
+        if (!mine || their.mtime > mine.mtime) {
+          console.log('[space] pulling', their.key, 'from peer')
+          const data = await peer.rpc.request(PEER_GET, Buffer.from(their.key))
+          if (data && data.length > 0) {
+            const abs = path.join(this._folder, their.key)
+            await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+            await fs.promises.writeFile(abs, data)
+            console.log('[space] synced', their.key)
+          }
+        }
+      }
+
+      console.log('[space] initial sync done')
+    } catch (err) {
+      console.log('[space] sync error:', err.message)
+    }
   }
 
-  _spacesJSON () {
-    return [...this.spaces.values()].map(s => s.toJSON())
+  async _buildManifest () {
+    const files = []
+    try {
+      for await (const entry of this._local.list('/')) {
+        const abs = path.join(this._folder, entry.key)
+        try {
+          const stat = await fs.promises.stat(abs)
+          files.push({
+            key:   entry.key,
+            mtime: stat.mtimeMs,
+            hash:  entry.value?.blob?.hash?.toString('hex') || ''
+          })
+        } catch {}
+      }
+    } catch (err) {
+      console.log('[space] manifest error:', err.message)
+    }
+    return files
+  }
+
+  startWatching () {
+    if (this._watch || this.paused) return
+    console.log('[space] starting watcher for', this._folder)
+
+    this._watch = new Localwatch(this._folder, {
+      filter: (filename) => Localwatch.defaultFilter(filename)
+    })
+
+    this._consumeWatch()
+  }
+
+  async _consumeWatch () {
+    for await (const diff of this._watch) {
+      if (this.paused) continue
+
+      for (const { type, filename } of diff) {
+        const rel = path.relative(this._folder, filename)
+        const key = '/' + rel.split(path.sep).join('/')
+        console.log('[space] local change:', type, key, 'peers:', this._peers.size)
+
+        try {
+          if (type === 'update') {
+            const data = await fs.promises.readFile(filename)
+            console.log('[space] pushing', key, 'to', this._peers.size, 'peers')
+
+            for (const [id, peer] of this._peers) {
+              try {
+                await peer.rpc.request(PEER_PUT, Buffer.from(
+                  JSON.stringify({ key, data: data.toString('base64') })
+                ))
+                console.log('[space] pushed', key, 'to', id)
+              } catch (err) {
+                console.log('[space] push failed to', id, err.message)
+              }
+            }
+
+          } else if (type === 'delete') {
+            for (const [id, peer] of this._peers) {
+              try {
+                await peer.rpc.request(PEER_DEL, Buffer.from(key))
+                console.log('[space] del pushed to', id)
+              } catch (err) {
+                console.log('[space] del failed to', id, err.message)
+              }
+            }
+          }
+
+          this._emit('space:changed', {
+            spaceId: this.id, type, key, peers: this._peers.size
+          })
+
+        } catch (err) {
+          console.log('[space] watch handler error:', err.message)
+        }
+      }
+    }
+  }
+
+  stopWatching () {
+    if (this._watch) {
+      console.log('[space] stopping watcher for', this.name)
+      this._watch.destroy()
+      this._watch = null
+    }
+  }
+
+  pause () {
+    this.paused = true
+    this.stopWatching()
+  }
+
+  resume () {
+    this.paused = false
+    this.startWatching()
+  }
+
+  toJSON () {
+    return {
+      id:     this.id,
+      name:   this.name,
+      key:    this.key.toString('hex'),
+      folder: this._folder,
+      peers:  this._peers.size,
+      paused: this.paused
+    }
+  }
+
+  async destroy () {
+    this.stopWatching()
+    for (const [, peer] of this._peers) {
+      try { peer.rpc.destroy() } catch {}
+    }
+    this._peers.clear()
   }
 }
 
-new Drift()
+module.exports = Space

@@ -1,6 +1,7 @@
 'use strict'
 
 const Hyperswarm = require('hyperswarm')
+const Protomux   = require('protomux')
 const crypto     = require('hypercore-crypto')
 const { spawn }  = require('bare-subprocess')
 const RPC        = require('bare-rpc')
@@ -26,8 +27,9 @@ const {
 
 class Drift {
   constructor () {
-    this.spaces  = new Map()
-    this._topics = new Map()
+    this.spaces  = new Map() // id → Space
+    this._topics = new Map() // topicHex → Space
+    this._conns  = new Map() // noiseKeyHex → { conn, mux, topics[] }
     this.swarm   = null
     this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
@@ -39,12 +41,53 @@ class Drift {
     store.init()
 
     this.swarm = new Hyperswarm()
+
     this.swarm.on('connection', (conn, info) => {
-      const topicHexes = (info.topics || []).map(t => t.toString('hex').slice(0, 8))
-      const discHex    = info.discoveryKey ? info.discoveryKey.toString('hex').slice(0, 8) : 'none'
-      console.log('[drift] connection topics:', topicHexes, 'discoveryKey:', discHex)
-      console.log('[drift] known topics:', [...this._topics.keys()].map(k => k.slice(0, 8)))
-      this._onConnection(conn, info)
+      const noiseKey  = info.publicKey.toString('hex')
+      const topicHexes = (info.topics || []).map(t => t.toString('hex'))
+      console.log('[drift] connection noise:', noiseKey.slice(0, 8), 'topics:', topicHexes.map(t => t.slice(0, 8)))
+
+      // create one shared mux per connection
+      const mux = new Protomux(conn)
+
+      conn.on('error', (err) => console.log('[drift] conn error:', err.message))
+      conn.on('close', () => {
+        console.log('[drift] conn closed', noiseKey.slice(0, 8))
+        this._conns.delete(noiseKey)
+      })
+
+      this._conns.set(noiseKey, { conn, mux, topics: topicHexes })
+
+      // route to matching spaces
+      if (topicHexes.length > 0) {
+        for (const hex of topicHexes) {
+          const space = this._topics.get(hex)
+          if (space) {
+            console.log('[drift] routing to space:', space.name)
+            space.addPeer(mux, info)
+          }
+        }
+      } else {
+        // responder side — no topics in info
+        // use swarm's peer topics if available via info.peer
+        const peerTopics = info.peer?.topics || []
+        if (peerTopics.length > 0) {
+          for (const t of peerTopics) {
+            const hex   = t.toString('hex')
+            const space = this._topics.get(hex)
+            if (space) {
+              console.log('[drift] peer topic routing to space:', space.name)
+              space.addPeer(mux, info)
+            }
+          }
+        } else {
+          // last resort — give to all spaces, protomux channel id keeps them isolated
+          console.log('[drift] no topics — giving mux to all spaces')
+          for (const space of this.spaces.values()) {
+            space.addPeer(mux, info)
+          }
+        }
+      }
     })
 
     const saved = store.loadSpaces()
@@ -56,36 +99,6 @@ class Drift {
     const spacesJSON = this._spacesJSON()
     console.log('[drift] ready, spaces:', spacesJSON.length)
     this._emit(CMD_READY, { spaces: spacesJSON })
-  }
-
-  _onConnection (conn, info) {
-    conn.on('error', (err) => console.log('[drift] conn error:', err.message))
-
-    // try topics (initiator side)
-    if (info.topics && info.topics.length > 0) {
-      for (const t of info.topics) {
-        const hex   = t.toString('hex')
-        const space = this._topics.get(hex)
-        console.log('[drift] topic lookup', hex.slice(0, 8), '->', space ? space.name : 'not found')
-        if (space) { space.addPeer(conn, info); return }
-      }
-    }
-
-    // try discoveryKey (responder side)
-    if (info.discoveryKey) {
-      const hex   = info.discoveryKey.toString('hex')
-      const space = this._topics.get(hex)
-      console.log('[drift] discoveryKey lookup', hex.slice(0, 8), '->', space ? space.name : 'not found')
-      if (space) { space.addPeer(conn, info); return }
-    }
-
-    // last resort — give connection to ALL spaces
-    // each space uses its own topic as protomux channel id
-    // so only the matching space will successfully open a channel
-    console.log('[drift] broadcasting connection to all spaces:', this.spaces.size)
-    for (const space of this.spaces.values()) {
-      space.addPeer(conn, info)
-    }
   }
 
   async _loadSpace (opts) {

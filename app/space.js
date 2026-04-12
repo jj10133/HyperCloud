@@ -20,21 +20,40 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map()
+    this._peers  = new Map() // noiseKeyHex → { mux, rpc }
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
   topic () { return this._topic }
 
-  addPeer (conn, info) {
+  // mux is a Protomux instance shared across all spaces on this connection
+  addPeer (mux, info) {
     const id = info.publicKey.toString('hex')
     if (this._peers.has(id)) return
 
     console.log('[space] addPeer', this.name, id.slice(0, 8))
 
-    const rpc = new RPC(conn, {
-      id: Buffer.from('drift/' + this.id)
+    let rpc
+    try {
+      // each space opens its own named channel on the shared mux
+      // protocol includes space id so channels don't collide across spaces
+      rpc = new RPC(mux, {
+        protocol: 'drift/sync',
+        id: Buffer.from(this.id)
+      })
+    } catch (err) {
+      // channel already open or rejected — this space isn't shared with this peer
+      console.log('[space] channel rejected for', this.name, err.message)
+      return
+    }
+
+    rpc.on('close', () => {
+      console.log('[space] rpc closed for', this.name, id.slice(0, 8))
+      this._peers.delete(id)
+      this._emit('peer:disconnected', {
+        spaceId: this.id, peerId: id, peers: this._peers.size
+      })
     })
 
     rpc.respond('manifest', async () => {
@@ -87,19 +106,7 @@ class Space {
       return Buffer.alloc(0)
     })
 
-    conn.on('close', () => {
-      console.log('[space] peer disconnected', id.slice(0, 8))
-      this._peers.delete(id)
-      this._emit('peer:disconnected', {
-        spaceId: this.id, peerId: id, peers: this._peers.size
-      })
-    })
-
-    conn.on('error', (err) => {
-      console.log('[space] conn error', id.slice(0, 8), err.message)
-    })
-
-    this._peers.set(id, { conn, rpc })
+    this._peers.set(id, { mux, rpc })
     console.log('[space] peer added, total:', this._peers.size)
 
     this._emit('peer:connected', {
@@ -115,6 +122,9 @@ class Space {
     if (!peer) { console.log('[space] peer gone'); return }
 
     try {
+      // wait for channel to be fully open before requesting
+      await peer.rpc.fullyOpened()
+
       const raw        = await peer.rpc.request('manifest', Buffer.alloc(0))
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')

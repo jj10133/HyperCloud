@@ -1,36 +1,35 @@
-//
-//  store.js
-//  App
-//
-//  Created by Janardhan on 2026-04-11.
-//
-
 'use strict'
 
 const fs   = require('bare-fs')
 const path = require('bare-path')
 const os   = require('bare-os')
 
-const DRIFT_DIR    = path.join(os.homedir(), '.drift')
-const SPACES_FILE  = path.join(DRIFT_DIR, 'spaces.json')
-const SYNC_DIR     = path.join(os.homedir(), 'Drift')
+const DRIFT_DIR   = path.join(os.homedir(), '.drift')
+const SPACES_FILE = path.join(DRIFT_DIR, 'spaces.json')
+const SYNC_DIR    = path.join(os.homedir(), 'Drift')
 
 function init () {
+  console.log('[store] DRIFT_DIR:', DRIFT_DIR)
+  console.log('[store] SPACES_FILE:', SPACES_FILE)
+  console.log('[store] SYNC_DIR:', SYNC_DIR)
   fs.mkdirSync(DRIFT_DIR, { recursive: true })
   fs.mkdirSync(SYNC_DIR,  { recursive: true })
 }
 
-// ── Spaces ───────────────────────────────────────────────────────────────────
-
 function loadSpaces () {
   try {
-    return JSON.parse(fs.readFileSync(SPACES_FILE, 'utf8'))
-  } catch {
+    const raw = fs.readFileSync(SPACES_FILE, 'utf8')
+    const spaces = JSON.parse(raw)
+    console.log('[store] loaded', spaces.length, 'spaces from', SPACES_FILE)
+    return spaces
+  } catch (err) {
+    console.log('[store] no spaces file found:', err.message)
     return []
   }
 }
 
 function saveSpaces (spaces) {
+  console.log('[store] saving', spaces.length, 'spaces to', SPACES_FILE)
   fs.writeFileSync(SPACES_FILE, JSON.stringify(spaces, null, 2))
 }
 
@@ -38,6 +37,7 @@ function addSpace (space) {
   const spaces = loadSpaces()
   spaces.push(space)
   saveSpaces(spaces)
+  console.log('[store] added space:', space.name)
 }
 
 function removeSpace (id) {
@@ -48,8 +48,6 @@ function removeSpace (id) {
 function getSpace (id) {
   return loadSpaces().find(s => s.id === id) || null
 }
-
-// ── Folder paths ─────────────────────────────────────────────────────────────
 
 function spacePath (name) {
   return path.join(SYNC_DIR, name)

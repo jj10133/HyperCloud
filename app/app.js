@@ -40,7 +40,10 @@ class Drift {
 
     this.swarm = new Hyperswarm()
     this.swarm.on('connection', (conn, info) => {
-      console.log('[drift] connection, topics:', info.topics?.length || 0)
+      const topicHexes = (info.topics || []).map(t => t.toString('hex').slice(0, 8))
+      const discHex    = info.discoveryKey ? info.discoveryKey.toString('hex').slice(0, 8) : 'none'
+      console.log('[drift] connection topics:', topicHexes, 'discoveryKey:', discHex)
+      console.log('[drift] known topics:', [...this._topics.keys()].map(k => k.slice(0, 8)))
       this._onConnection(conn, info)
     })
 
@@ -48,7 +51,6 @@ class Drift {
     console.log('[drift] loading', saved.length, 'saved spaces')
     for (const opts of saved) await this._loadSpace(opts)
 
-    // small delay so Swift IPC read loop is ready before we push CMD_READY
     await new Promise(resolve => setTimeout(resolve, 500))
 
     const spacesJSON = this._spacesJSON()
@@ -59,32 +61,43 @@ class Drift {
   _onConnection (conn, info) {
     conn.on('error', (err) => console.log('[drift] conn error:', err.message))
 
+    // try topics first (initiator side)
     if (info.topics && info.topics.length > 0) {
       for (const t of info.topics) {
-        const space = this._topics.get(t.toString('hex'))
+        const hex   = t.toString('hex')
+        const space = this._topics.get(hex)
+        console.log('[drift] topic lookup', hex.slice(0, 8), '->', space ? space.name : 'not found')
         if (space) { space.addPeer(conn, info); return }
       }
     }
 
+    // try discoveryKey (responder side)
     if (info.discoveryKey) {
-      const space = this._topics.get(info.discoveryKey.toString('hex'))
+      const hex   = info.discoveryKey.toString('hex')
+      const space = this._topics.get(hex)
+      console.log('[drift] discoveryKey lookup', hex.slice(0, 8), '->', space ? space.name : 'not found')
       if (space) { space.addPeer(conn, info); return }
     }
 
+    // single space fallback
     if (this.spaces.size === 1) {
+      console.log('[drift] single space fallback')
       const space = [...this.spaces.values()][0]
       space.addPeer(conn, info)
       return
     }
 
-    console.log('[drift] no space found for connection')
+    console.log('[drift] no space found for connection — dropping')
   }
 
   async _loadSpace (opts) {
     console.log('[drift] loading space:', opts.name)
     const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
+
     this.spaces.set(space.id, space)
+    // register topic BEFORE joining so connections that come in during flushed() are handled
     this._topics.set(space.topic().toString('hex'), space)
+    console.log('[drift] registered topic', space.topic().toString('hex').slice(0, 8), 'for', opts.name)
 
     const discovery = this.swarm.join(space.topic(), { server: true, client: true })
     await discovery.flushed()

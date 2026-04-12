@@ -1,12 +1,12 @@
 'use strict'
 
-const Localdrive  = require('localdrive')
-const Localwatch  = require('localwatch')
-const RPC         = require('protomux-rpc')
-const crypto      = require('hypercore-crypto')
-const fs          = require('bare-fs')
-const path        = require('bare-path')
-const store       = require('./store')
+const Localdrive = require('localdrive')
+const Localwatch = require('localwatch')
+const RPC        = require('bare-rpc')
+const crypto     = require('hypercore-crypto')
+const fs         = require('bare-fs')
+const path       = require('bare-path')
+const store      = require('./store')
 
 class Space {
   constructor (opts, emit) {
@@ -20,112 +20,114 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map()
+    this._peers  = new Map() // noiseKeyHex → rpc
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
   topic () { return this._topic }
 
-  // isInitiator = true when we have the topic in info.topics (we joined first)
-  addPeer (mux, info, isInitiator) {
+  addPeer (conn, info, isInitiator) {
     const id = info.publicKey.toString('hex')
     if (this._peers.has(id)) return
 
     console.log('[space] addPeer', this.name, id.slice(0, 8), isInitiator ? '(initiator)' : '(responder)')
 
-    let rpc
-    try {
-      rpc = new RPC(mux, {
-        protocol: 'drift/sync',
-        id: Buffer.from(this.id)
-      })
-    } catch (err) {
-      console.log('[space] channel rejected for', this.name, err.message)
-      return
-    }
+    const rpc = new RPC(conn, (req) => this._onRequest(req))
 
-    rpc.respond('manifest', async () => {
-      const manifest = await this._buildManifest()
-      console.log('[space] sending manifest:', manifest.length, 'files')
-      return Buffer.from(JSON.stringify(manifest))
-    })
-
-    rpc.respond('get', async (key) => {
-      const abs = path.join(this._folder, key.toString())
-      console.log('[space] peer GET', key.toString())
-      try {
-        return await fs.promises.readFile(abs)
-      } catch (err) {
-        console.log('[space] GET failed', err.message)
-        return Buffer.alloc(0)
-      }
-    })
-
-    rpc.respond('put', async (data) => {
-      const { key, data: b64 } = JSON.parse(data.toString())
-      const buf = Buffer.from(b64, 'base64')
-      const abs = path.join(this._folder, key)
-      console.log('[space] peer PUT', key, buf.length, 'bytes')
-      try {
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true })
-        await fs.promises.writeFile(abs, buf)
-        console.log('[space] wrote', key)
-        this._emit('space:changed', {
-          spaceId: this.id, type: 'update', key, peers: this._peers.size
-        })
-      } catch (err) {
-        console.log('[space] PUT failed', key, err.message)
-      }
-      return Buffer.alloc(0)
-    })
-
-    rpc.respond('del', async (data) => {
-      const key = data.toString()
-      const abs = path.join(this._folder, key)
-      console.log('[space] peer DEL', key)
-      try {
-        await fs.promises.unlink(abs)
-        this._emit('space:changed', {
-          spaceId: this.id, type: 'delete', key, peers: this._peers.size
-        })
-      } catch (err) {
-        console.log('[space] DEL failed', key, err.message)
-      }
-      return Buffer.alloc(0)
-    })
-
-    rpc.once('open', () => {
-      console.log('[space] channel open', this.name, id.slice(0, 8))
-      this._peers.set(id, { mux, rpc })
-      console.log('[space] peer added, total:', this._peers.size)
-      this._emit('peer:connected', {
-        spaceId: this.id, peerId: id, peers: this._peers.size
-      })
-      // only initiator syncs — avoids both sides requesting at same time
-      if (isInitiator) this._syncWithPeer(id)
-    })
-
-    rpc.once('close', () => {
-      if (!this._peers.has(id)) {
-        console.log('[space] channel closed before open (remote missing space):', this.name)
-        return
-      }
+    conn.on('close', () => {
       console.log('[space] peer disconnected', this.name, id.slice(0, 8))
       this._peers.delete(id)
       this._emit('peer:disconnected', {
         spaceId: this.id, peerId: id, peers: this._peers.size
       })
     })
+
+    conn.on('error', (err) => {
+      console.log('[space] conn error', id.slice(0, 8), err.message)
+    })
+
+    this._peers.set(id, rpc)
+    console.log('[space] peer added, total:', this._peers.size)
+
+    this._emit('peer:connected', {
+      spaceId: this.id, peerId: id, peers: this._peers.size
+    })
+
+    // only initiator starts the sync to avoid both sides requesting at once
+    if (isInitiator) this._syncWithPeer(id)
+  }
+
+  async _onRequest (req) {
+    switch (req.command) {
+
+      case 1: { // manifest
+        const manifest = await this._buildManifest()
+        console.log('[space] sending manifest:', manifest.length, 'files')
+        req.reply(Buffer.from(JSON.stringify(manifest)))
+        break
+      }
+
+      case 2: { // get
+        const key = req.data.toString()
+        const abs = path.join(this._folder, key)
+        console.log('[space] peer GET', key)
+        try {
+          req.reply(await fs.promises.readFile(abs))
+        } catch {
+          req.reply(Buffer.alloc(0))
+        }
+        break
+      }
+
+      case 3: { // put
+        const { key, data: b64 } = JSON.parse(req.data.toString())
+        const buf = Buffer.from(b64, 'base64')
+        const abs = path.join(this._folder, key)
+        console.log('[space] peer PUT', key, buf.length, 'bytes')
+        try {
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+          await fs.promises.writeFile(abs, buf)
+          console.log('[space] wrote', key)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'update', key, peers: this._peers.size
+          })
+        } catch (err) {
+          console.log('[space] PUT failed', err.message)
+        }
+        req.reply(Buffer.alloc(0))
+        break
+      }
+
+      case 4: { // del
+        const key = req.data.toString()
+        const abs = path.join(this._folder, key)
+        console.log('[space] peer DEL', key)
+        try {
+          await fs.promises.unlink(abs)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'delete', key, peers: this._peers.size
+          })
+        } catch (err) {
+          console.log('[space] DEL failed', err.message)
+        }
+        req.reply(Buffer.alloc(0))
+        break
+      }
+
+      default:
+        req.reply(Buffer.alloc(0))
+    }
   }
 
   async _syncWithPeer (peerId) {
     console.log('[space] syncing with', peerId.slice(0, 8))
-    const peer = this._peers.get(peerId)
-    if (!peer) { console.log('[space] peer gone'); return }
+    const rpc = this._peers.get(peerId)
+    if (!rpc) { console.log('[space] peer gone'); return }
 
     try {
-      const raw        = await peer.rpc.request('manifest', Buffer.alloc(0))
+      // get their manifest
+      const raw        = await rpc.request(1).send(Buffer.alloc(0))
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')
 
@@ -136,7 +138,7 @@ class Space {
         const mine = myMap.get(their.key)
         if (!mine || their.mtime > mine.mtime) {
           console.log('[space] pulling', their.key)
-          const data = await peer.rpc.request('get', Buffer.from(their.key))
+          const data = await rpc.request(2).send(Buffer.from(their.key))
           if (data && data.length > 0) {
             const abs = path.join(this._folder, their.key)
             await fs.promises.mkdir(path.dirname(abs), { recursive: true })
@@ -188,12 +190,13 @@ class Space {
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
         console.log('[space] change:', type, key, 'peers:', this._peers.size)
+
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
-            for (const [id, peer] of this._peers) {
+            for (const [id, rpc] of this._peers) {
               try {
-                await peer.rpc.request('put', Buffer.from(
+                await rpc.request(3).send(Buffer.from(
                   JSON.stringify({ key, data: data.toString('base64') })
                 ))
                 console.log('[space] pushed', key, 'to', id.slice(0, 8))
@@ -202,18 +205,20 @@ class Space {
               }
             }
           } else if (type === 'delete') {
-            for (const [id, peer] of this._peers) {
+            for (const [id, rpc] of this._peers) {
               try {
-                await peer.rpc.request('del', Buffer.from(key))
+                await rpc.request(4).send(Buffer.from(key))
                 console.log('[space] del pushed to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] del failed to', id.slice(0, 8), err.message)
               }
             }
           }
+
           this._emit('space:changed', {
             spaceId: this.id, type, key, peers: this._peers.size
           })
+
         } catch (err) {
           console.log('[space] watch error:', err.message)
         }
@@ -241,9 +246,6 @@ class Space {
 
   async destroy () {
     this.stopWatching()
-    for (const [, peer] of this._peers) {
-      try { peer.rpc.destroy() } catch {}
-    }
     this._peers.clear()
   }
 }

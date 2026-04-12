@@ -1,7 +1,6 @@
 'use strict'
 
 const Hyperswarm = require('hyperswarm')
-const Protomux   = require('protomux')
 const crypto     = require('hypercore-crypto')
 const { spawn }  = require('bare-subprocess')
 const RPC        = require('bare-rpc')
@@ -27,8 +26,8 @@ const {
 
 class Drift {
   constructor () {
-    this.spaces  = new Map()
-    this._topics = new Map()
+    this.spaces  = new Map() // id → Space
+    this._topics = new Map() // topicHex → Space
     this.swarm   = null
     this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
@@ -44,38 +43,45 @@ class Drift {
     this.swarm.on('connection', (conn, info) => {
       const noiseKey   = info.publicKey.toString('hex')
       const topicHexes = (info.topics || []).map(t => t.toString('hex'))
-      console.log('[drift] connection noise:', noiseKey.slice(0, 8), 'topics:', topicHexes.map(t => t.slice(0, 8)))
+      const discHex    = info.discoveryKey ? info.discoveryKey.toString('hex') : null
 
-      const mux = new Protomux(conn)
+      console.log('[drift] connection noise:', noiseKey.slice(0, 8),
+        'topics:', topicHexes.map(t => t.slice(0, 8)),
+        'disc:', discHex ? discHex.slice(0, 8) : 'none')
+
       conn.on('error', (err) => console.log('[drift] conn error:', err.message))
 
-      // find matching spaces
-      const matched = []
-
+      // initiator side — info.topics is populated
       if (topicHexes.length > 0) {
         for (const hex of topicHexes) {
           const space = this._topics.get(hex)
-          if (space) matched.push({ space, initiator: true })
+          if (space) {
+            console.log('[drift] routing to space:', space.name, '(initiator)')
+            space.addPeer(conn, info, true)
+            return
+          }
         }
       }
 
-      if (matched.length === 0) {
-        // responder side has no topics — give mux to ALL spaces
-        // protomux-rpc will only open channels that the remote also opens
-        console.log('[drift] no topics — giving mux to all spaces')
-        for (const space of this.spaces.values()) matched.push({ space, initiator: false })
+      // responder side — use discoveryKey which equals the topic
+      if (discHex) {
+        const space = this._topics.get(discHex)
+        if (space) {
+          console.log('[drift] routing to space:', space.name, '(responder)')
+          space.addPeer(conn, info, false)
+          return
+        }
       }
 
-      console.log('[drift] matched spaces:', matched.map(m => m.space.name))
-      for (const { space, initiator } of matched) space.addPeer(mux, info, initiator)
+      console.log('[drift] no space found for connection')
     })
 
-    // load all spaces first WITHOUT joining swarm
+    // register all spaces first
     const saved = store.loadSpaces()
     console.log('[drift] loading', saved.length, 'saved spaces')
     for (const opts of saved) this._registerSpace(opts)
 
-    // now join swarm for all spaces at once
+    // join swarm for all spaces at once
     const discoveries = []
     for (const space of this.spaces.values()) {
       const d = this.swarm.join(space.topic(), { server: true, client: true })
@@ -93,7 +99,6 @@ class Drift {
     this._emit(CMD_READY, { spaces: spacesJSON })
   }
 
-  // register space in memory only — no swarm join yet
   _registerSpace (opts) {
     console.log('[drift] registering space:', opts.name)
     const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
@@ -103,7 +108,6 @@ class Drift {
     return space
   }
 
-  // register + join swarm + watch — for newly created/joined spaces
   async _loadSpace (opts) {
     const space = this._registerSpace(opts)
     const discovery = this.swarm.join(space.topic(), { server: true, client: true })

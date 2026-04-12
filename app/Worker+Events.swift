@@ -8,7 +8,7 @@ extension Worker {
         guard let raw  = event.data,
               let dict = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         else {
-            print("[worker] event \(event.command) has no parseable data")
+            print("[worker] event \(event.command) — no parseable data")
             return
         }
 
@@ -18,11 +18,11 @@ extension Worker {
 
         case Cmd.ready:
             let rawSpaces = dict["spaces"] as? [[String: Any]] ?? []
-            let loaded    = rawSpaces.map { Space(from: $0) }
+            let loaded    = rawSpaces.map { Space(fromDict: $0) }
             DispatchQueue.main.async {
                 self.spaces = loaded
                 self.ready  = true
-                print("[worker] ready — loaded \(loaded.count) spaces")
+                print("[worker] ready — \(loaded.count) spaces")
             }
 
         case Cmd.spaceChanged:

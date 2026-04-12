@@ -9,16 +9,13 @@ const path        = require('bare-path')
 const c           = require('compact-encoding')
 const store       = require('./store')
 
-// peer protocol commands
 const PEER_MANIFEST = 1
 const PEER_GET      = 2
 const PEER_PUT      = 3
 const PEER_DEL      = 4
 
-// encodings
-const strEnc  = { requestEncoding: c.string, responseEncoding: c.buffer }
-const bufEnc  = { requestEncoding: c.buffer, responseEncoding: c.buffer }
-const voidEnc = { requestEncoding: c.buffer, responseEncoding: c.buffer }
+// use c.raw — handles any buffer including empty ones, no length prefix issues
+const enc = { requestEncoding: c.raw, responseEncoding: c.raw }
 
 class Space {
   constructor (opts, emit) {
@@ -47,21 +44,17 @@ class Space {
 
     console.log('[space] addPeer', this.name, id.slice(0, 8))
 
-    // protomux-rpc opens its own named channel on the stream
-    const rpc = new RPC(conn, {
-      id: Buffer.from('drift/sync/1')
-    })
+    const rpc = new RPC(conn, { id: Buffer.from('drift/sync/1') })
 
-    // register handlers for incoming requests from peer
-    rpc.respond(PEER_MANIFEST, bufEnc, async () => {
+    rpc.respond(PEER_MANIFEST, enc, async () => {
       const manifest = await this._buildManifest()
       console.log('[space] sending manifest:', manifest.length, 'files')
       return Buffer.from(JSON.stringify(manifest))
     })
 
-    rpc.respond(PEER_GET, strEnc, async (key) => {
-      const abs = path.join(this._folder, key)
-      console.log('[space] peer GET', key)
+    rpc.respond(PEER_GET, enc, async (key) => {
+      const abs = path.join(this._folder, key.toString())
+      console.log('[space] peer GET', key.toString())
       try {
         return await fs.promises.readFile(abs)
       } catch (err) {
@@ -70,7 +63,7 @@ class Space {
       }
     })
 
-    rpc.respond(PEER_PUT, bufEnc, async (data) => {
+    rpc.respond(PEER_PUT, enc, async (data) => {
       const { key, data: b64 } = JSON.parse(data.toString())
       const buf = Buffer.from(b64, 'base64')
       const abs = path.join(this._folder, key)
@@ -88,7 +81,7 @@ class Space {
       return Buffer.alloc(0)
     })
 
-    rpc.respond(PEER_DEL, bufEnc, async (data) => {
+    rpc.respond(PEER_DEL, enc, async (data) => {
       const key = data.toString()
       const abs = path.join(this._folder, key)
       console.log('[space] peer DEL', key)
@@ -135,7 +128,7 @@ class Space {
     if (!peer) { console.log('[space] peer gone'); return }
 
     try {
-      const raw        = await peer.rpc.request(PEER_MANIFEST, Buffer.alloc(0), bufEnc)
+      const raw        = await peer.rpc.request(PEER_MANIFEST, Buffer.alloc(0), enc)
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')
 
@@ -146,7 +139,7 @@ class Space {
         const mine = myMap.get(their.key)
         if (!mine || their.mtime > mine.mtime) {
           console.log('[space] pulling', their.key)
-          const data = await peer.rpc.request(PEER_GET, Buffer.from(their.key), strEnc)
+          const data = await peer.rpc.request(PEER_GET, Buffer.from(their.key), enc)
           if (data && data.length > 0) {
             const abs = path.join(this._folder, their.key)
             await fs.promises.mkdir(path.dirname(abs), { recursive: true })
@@ -205,22 +198,20 @@ class Space {
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
-
             for (const [id, peer] of this._peers) {
               try {
                 await peer.rpc.request(PEER_PUT, Buffer.from(
                   JSON.stringify({ key, data: data.toString('base64') })
-                ), bufEnc)
+                ), enc)
                 console.log('[space] pushed', key, 'to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] push failed to', id.slice(0, 8), err.message)
               }
             }
-
           } else if (type === 'delete') {
             for (const [id, peer] of this._peers) {
               try {
-                await peer.rpc.request(PEER_DEL, Buffer.from(key), bufEnc)
+                await peer.rpc.request(PEER_DEL, Buffer.from(key), enc)
                 console.log('[space] del pushed to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] del failed to', id.slice(0, 8), err.message)

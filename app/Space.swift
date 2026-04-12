@@ -15,8 +15,7 @@ struct Space: Identifiable, Codable {
     var peers:  Int
     var paused: Bool
 
-    // decoded from JS JSON
-    init(from dict: [String: Any]) {
+    init(fromDict dict: [String: Any]) {
         id     = dict["id"]     as? String ?? UUID().uuidString
         name   = dict["name"]   as? String ?? "unnamed"
         folder = dict["folder"] as? String ?? ""

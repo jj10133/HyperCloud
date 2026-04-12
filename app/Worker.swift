@@ -16,8 +16,6 @@ final class Worker: ObservableObject {
         Task { await bridge.start() }
     }
 
-    // MARK: - Public API
-
     func createSpace(name: String) {
         Task {
             guard let res = try? await bridge.request(Cmd.createSpace, body: ["name": name]) else {
@@ -26,7 +24,7 @@ final class Worker: ObservableObject {
             }
             print("[worker] createSpace response: \(res)")
             if res["error"] != nil { return }
-            let space = Space(from: res)
+            let space = Space(fromDict: res)
             await MainActor.run { spaces.append(space) }
         }
     }
@@ -39,7 +37,7 @@ final class Worker: ObservableObject {
             }
             print("[worker] joinSpace response: \(res)")
             if res["error"] != nil { return }
-            let space = Space(from: res)
+            let space = Space(fromDict: res)
             await MainActor.run { spaces.append(space) }
         }
     }
@@ -81,8 +79,6 @@ final class Worker: ObservableObject {
         let res = try? await bridge.request(Cmd.getSpaceKey, body: ["id": id])
         return res?["key"] as? String
     }
-
-    // MARK: - Lifecycle
 
     func suspend()   { bridge.suspend() }
     func resume()    { bridge.resume() }

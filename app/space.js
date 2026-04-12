@@ -3,6 +3,7 @@
 const Localdrive       = require('localdrive')
 const DistributedDrive = require('distributed-drive')
 const Localwatch       = require('localwatch')
+const Protomux         = require('protomux')
 const crypto           = require('hypercore-crypto')
 const fs               = require('bare-fs')
 const path             = require('bare-path')
@@ -35,13 +36,13 @@ class Space {
 
   addPeer (conn, info) {
     const id = info.publicKey.toString('hex')
-    if (this._peers.has(id)) return // already connected
+    if (this._peers.has(id)) return
 
     this._peers.set(id, conn)
 
-    // hand connection to distributed-drive — it opens its own protomux-rpc
-    // channel on the stream for file operations
-    this._drive.addPeer(conn)
+    // hyperswarm gives a raw stream — protomux-rpc needs a Protomux instance
+    const mux = new Protomux(conn)
+    this._drive.addPeer(mux)
 
     conn.on('close', () => {
       this._peers.delete(id)
@@ -52,7 +53,7 @@ class Space {
       })
     })
 
-    conn.on('error', () => {}) // prevent unhandled error crashes
+    conn.on('error', () => {}) // prevent unhandled crashes
 
     this._emit('peer:connected', {
       spaceId: this.id,
@@ -60,7 +61,7 @@ class Space {
       peers:   this._peers.size
     })
 
-    // do initial sync with new peer
+    // pull anything newer from the new peer
     this._initialSync()
   }
 
@@ -69,12 +70,10 @@ class Space {
   }
 
   // ── Initial sync ──────────────────────────────────────────────────────────
-  // on connect — walk peer's files, pull anything newer than local
 
   async _initialSync () {
     try {
-      for await (const { key, mtime, size } of this._drive.listAll('/')) {
-        // check if we have it locally and if it's older
+      for await (const { key, mtime } of this._drive.listAll('/')) {
         const localEntry = await this._local.entry(key)
         const localMtime = localEntry?.value?.metadata?.mtime || 0
 
@@ -87,8 +86,8 @@ class Space {
           }
         }
       }
-    } catch (err) {
-      // peer may disconnect mid-sync, that's fine
+    } catch {
+      // peer may disconnect mid-sync, that is fine
     }
   }
 
@@ -109,14 +108,12 @@ class Space {
       if (this.paused) continue
 
       for (const { type, filename } of diff) {
-        // normalize to a drive key — strip folder prefix, ensure leading /
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
 
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
-            // put() writes locally (already done by fs) and pushes to all peers
             await this._drive.put(key, data)
           } else if (type === 'delete') {
             await this._drive.del(key)
@@ -129,7 +126,7 @@ class Space {
             peers:   this._peers.size
           })
         } catch {
-          // ignore transient errors — temp files, files in use, etc.
+          // ignore transient errors
         }
       }
     }

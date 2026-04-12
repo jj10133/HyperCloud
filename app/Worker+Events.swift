@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import BareRPC
 
 extension Worker {
 
@@ -25,7 +26,7 @@ extension Worker {
             let rawSpaces = dict["spaces"] as? [[String: Any]] ?? []
             print("[worker] spaces in payload: \(rawSpaces.count)")
             for s in rawSpaces { print("[worker]   space: \(s["name"] ?? "?") id: \(s["id"] ?? "?")") }
-            let loaded = rawSpaces.map { DriftSpace(from: $0) }
+            let loaded = rawSpaces.map { Space(from: $0) }
             DispatchQueue.main.async {
                 self.spaces = loaded
                 self.ready  = true

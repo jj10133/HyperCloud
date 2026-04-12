@@ -68,6 +68,9 @@ struct SpacesListView: View {
             }
             .padding(.vertical, 4)
         }
+        .onAppear {
+            worker.loadSpaces()
+        }
     }
 }
 

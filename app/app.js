@@ -61,7 +61,7 @@ class Drift {
   _onConnection (conn, info) {
     conn.on('error', (err) => console.log('[drift] conn error:', err.message))
 
-    // try topics first (initiator side)
+    // try topics (initiator side)
     if (info.topics && info.topics.length > 0) {
       for (const t of info.topics) {
         const hex   = t.toString('hex')
@@ -79,15 +79,13 @@ class Drift {
       if (space) { space.addPeer(conn, info); return }
     }
 
-    // single space fallback
-    if (this.spaces.size === 1) {
-      console.log('[drift] single space fallback')
-      const space = [...this.spaces.values()][0]
+    // last resort — give connection to ALL spaces
+    // each space uses its own topic as protomux channel id
+    // so only the matching space will successfully open a channel
+    console.log('[drift] broadcasting connection to all spaces:', this.spaces.size)
+    for (const space of this.spaces.values()) {
       space.addPeer(conn, info)
-      return
     }
-
-    console.log('[drift] no space found for connection — dropping')
   }
 
   async _loadSpace (opts) {
@@ -95,7 +93,6 @@ class Drift {
     const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
 
     this.spaces.set(space.id, space)
-    // register topic BEFORE joining so connections that come in during flushed() are handled
     this._topics.set(space.topic().toString('hex'), space)
     console.log('[drift] registered topic', space.topic().toString('hex').slice(0, 8), 'for', opts.name)
 

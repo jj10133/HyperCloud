@@ -14,7 +14,6 @@ const PEER_GET      = 2
 const PEER_PUT      = 3
 const PEER_DEL      = 4
 
-// use c.raw — handles any buffer including empty ones, no length prefix issues
 const enc = { requestEncoding: c.raw, responseEncoding: c.raw }
 
 class Space {
@@ -34,9 +33,7 @@ class Space {
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
-  topic () {
-    return this._topic
-  }
+  topic () { return this._topic }
 
   addPeer (conn, info) {
     const id = info.publicKey.toString('hex')
@@ -44,7 +41,9 @@ class Space {
 
     console.log('[space] addPeer', this.name, id.slice(0, 8))
 
-    const rpc = new RPC(conn, { id: Buffer.from('drift/sync/1') })
+    // use topic as channel id — unique per space so multiple spaces
+    // on same connection are properly multiplexed
+    const rpc = new RPC(conn, { id: this._topic })
 
     rpc.respond(PEER_MANIFEST, enc, async () => {
       const manifest = await this._buildManifest()
@@ -100,9 +99,7 @@ class Space {
       console.log('[space] peer disconnected', id.slice(0, 8))
       this._peers.delete(id)
       this._emit('peer:disconnected', {
-        spaceId: this.id,
-        peerId:  id,
-        peers:   this._peers.size
+        spaceId: this.id, peerId: id, peers: this._peers.size
       })
     })
 
@@ -114,9 +111,7 @@ class Space {
     console.log('[space] peer added, total:', this._peers.size)
 
     this._emit('peer:connected', {
-      spaceId: this.id,
-      peerId:  id,
-      peers:   this._peers.size
+      spaceId: this.id, peerId: id, peers: this._peers.size
     })
 
     this._syncWithPeer(id)
@@ -178,23 +173,19 @@ class Space {
   startWatching () {
     if (this._watch || this.paused) return
     console.log('[space] watching', this._folder)
-
     this._watch = new Localwatch(this._folder, {
       filter: (filename) => Localwatch.defaultFilter(filename)
     })
-
     this._consumeWatch()
   }
 
   async _consumeWatch () {
     for await (const diff of this._watch) {
       if (this.paused) continue
-
       for (const { type, filename } of diff) {
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
         console.log('[space] change:', type, key, 'peers:', this._peers.size)
-
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
@@ -218,11 +209,9 @@ class Space {
               }
             }
           }
-
           this._emit('space:changed', {
             spaceId: this.id, type, key, peers: this._peers.size
           })
-
         } catch (err) {
           console.log('[space] watch error:', err.message)
         }
@@ -231,21 +220,11 @@ class Space {
   }
 
   stopWatching () {
-    if (this._watch) {
-      this._watch.destroy()
-      this._watch = null
-    }
+    if (this._watch) { this._watch.destroy(); this._watch = null }
   }
 
-  pause () {
-    this.paused = true
-    this.stopWatching()
-  }
-
-  resume () {
-    this.paused = false
-    this.startWatching()
-  }
+  pause ()  { this.paused = true;  this.stopWatching() }
+  resume () { this.paused = false; this.startWatching() }
 
   toJSON () {
     return {

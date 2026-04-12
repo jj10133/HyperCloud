@@ -26,8 +26,8 @@ const {
 
 class Drift {
   constructor () {
-    this.spaces  = new Map() // id → Space
-    this._topics = new Map() // topicHex → Space
+    this.spaces  = new Map()
+    this._topics = new Map()
     this.swarm   = null
     this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
@@ -47,6 +47,9 @@ class Drift {
     const saved = store.loadSpaces()
     console.log('[drift] loading', saved.length, 'saved spaces')
     for (const opts of saved) await this._loadSpace(opts)
+
+    // small delay so Swift IPC read loop is ready before we push CMD_READY
+    await new Promise(resolve => setTimeout(resolve, 500))
 
     const spacesJSON = this._spacesJSON()
     console.log('[drift] ready, spaces:', spacesJSON.length)

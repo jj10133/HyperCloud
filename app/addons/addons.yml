@@ -11,3 +11,4 @@ targets:
       - framework: rabin-native.2.0.0.xcframework
       - framework: sodium-native.5.1.0.xcframework
       - framework: udx-native.1.19.2.xcframework
+      - framework: bare-crypto.1.13.4.xcframework

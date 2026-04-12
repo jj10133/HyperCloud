@@ -5,13 +5,16 @@ const watchDrive = require('watch-drive')
 const Protomux   = require('protomux')
 const c          = require('compact-encoding')
 const crypto     = require('hypercore-crypto')
-const path       = require('bare-path')
 const store      = require('./store')
 
 const jsonEnc = {
   preencode (state, v) { c.string.preencode(state, JSON.stringify(v)) },
   encode    (state, v) { c.string.encode(state, JSON.stringify(v)) },
   decode    (state)    { return JSON.parse(c.string.decode(state)) }
+}
+
+function hashBuf (buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex')
 }
 
 class Space {
@@ -21,12 +24,13 @@ class Space {
     this.key    = Buffer.from(opts.key, 'hex')
     this.paused = opts.paused || false
 
-    this._emit   = emit
-    this._folder = store.ensureSpaceFolder(this.name)
-    this._topic  = crypto.hash(this.key)
-    this._local  = new Localdrive(this._folder)
-    this._watch  = null
-    this._peers  = new Map()
+    this._emit         = emit
+    this._folder       = store.ensureSpaceFolder(this.name)
+    this._topic        = crypto.hash(this.key)
+    this._local        = new Localdrive(this._folder)
+    this._watch        = null
+    this._peers        = new Map()
+    this._receivedHash = new Map() // key → sha256 of last peer-written content
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
@@ -54,7 +58,6 @@ class Space {
           spaceId: self.id, peerId: id, peers: self._peers.size
         })
 
-        // send our manifest on open
         const files = await self._buildManifest()
         console.log('[space] sending manifest', files.length, 'files to', peerId)
         msgs.manifest.send(files)
@@ -74,14 +77,13 @@ class Space {
       return
     }
 
-    // msg 0: manifest — [{ key, mtime, hash }]
+    // msg 0: manifest
     msgs.manifest = channel.addMessage({
       encoding: jsonEnc,
       async onmessage (theirFiles) {
         console.log('[space] got manifest', theirFiles.length, 'files from', peerId)
         const myFiles = await self._buildManifest()
         const myMap   = new Map(myFiles.map(f => [f.key, f]))
-
         for (const their of theirFiles) {
           const mine = myMap.get(their.key)
           if (!mine || their.mtime > mine.mtime) {
@@ -92,12 +94,23 @@ class Space {
       }
     })
 
-    // msg 1: file — { key, data (base64) }
+    // msg 1: file
     msgs.file = channel.addMessage({
       encoding: jsonEnc,
       async onmessage ({ key, data: b64 }) {
         const buf = Buffer.from(b64, 'base64')
         console.log('[space] recv file', key, buf.length, 'bytes from', peerId)
+
+        // skip if content identical to what we already have
+        const existing = await self._local.get(key)
+        if (existing && existing.equals(buf)) {
+          console.log('[space] skip (identical)', key)
+          return
+        }
+
+        // store hash so watch-drive knows this write came from a peer
+        self._receivedHash.set(key, hashBuf(buf))
+
         try {
           await self._local.put(key, buf)
           self._emit('space:changed', {
@@ -105,15 +118,17 @@ class Space {
           })
         } catch (err) {
           console.log('[space] write failed', key, err.message)
+          self._receivedHash.delete(key)
         }
       }
     })
 
-    // msg 2: del — key string
+    // msg 2: del
     msgs.del = channel.addMessage({
       encoding: c.string,
       async onmessage (key) {
         console.log('[space] recv del', key, 'from', peerId)
+        self._receivedHash.set(key, '__deleted__')
         try {
           await self._local.del(key)
           self._emit('space:changed', {
@@ -121,11 +136,12 @@ class Space {
           })
         } catch (err) {
           console.log('[space] del failed', key, err.message)
+          self._receivedHash.delete(key)
         }
       }
     })
 
-    // msg 3: want — peer requests a specific file
+    // msg 3: want
     msgs.want = channel.addMessage({
       encoding: c.string,
       async onmessage (key) {
@@ -170,7 +186,30 @@ class Space {
       if (this.paused) continue
 
       for (const { type, key } of diff) {
-        console.log('[space] change:', type, key, 'peers:', this._peers.size)
+        // check if this change was caused by a peer write
+        if (this._receivedHash.has(key)) {
+          if (type === 'delete' && this._receivedHash.get(key) === '__deleted__') {
+            // our own delete — skip
+            this._receivedHash.delete(key)
+            console.log('[space] skip (peer delete)', key)
+            continue
+          }
+
+          if (type === 'update') {
+            const buf  = await this._local.get(key)
+            const hash = buf ? hashBuf(buf) : null
+            if (hash && hash === this._receivedHash.get(key)) {
+              // hash matches what we received — skip, it's our own write
+              this._receivedHash.delete(key)
+              console.log('[space] skip (peer write)', key)
+              continue
+            }
+            // hash differs — user edited AFTER peer write, push it
+            this._receivedHash.delete(key)
+          }
+        }
+
+        console.log('[space] local change:', type, key, 'peers:', this._peers.size)
 
         try {
           if (type === 'update') {
@@ -186,7 +225,7 @@ class Space {
           }
 
           this._emit('space:changed', {
-            spaceId: this.id, type, key, peers: this._peers.size
+            spaceId: this.id, type, key, peers: self._peers.size
           })
         } catch (err) {
           console.log('[space] watch error:', err.message)

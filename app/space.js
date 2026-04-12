@@ -27,11 +27,12 @@ class Space {
 
   topic () { return this._topic }
 
-  addPeer (mux, info) {
+  // isInitiator = true when we have the topic in info.topics (we joined first)
+  addPeer (mux, info, isInitiator) {
     const id = info.publicKey.toString('hex')
     if (this._peers.has(id)) return
 
-    console.log('[space] addPeer', this.name, id.slice(0, 8))
+    console.log('[space] addPeer', this.name, id.slice(0, 8), isInitiator ? '(initiator)' : '(responder)')
 
     let rpc
     try {
@@ -94,25 +95,20 @@ class Space {
       return Buffer.alloc(0)
     })
 
-    // wait for open event before considering peer connected
-    // if remote doesn't open the same channel it will fire close instead
     rpc.once('open', () => {
-      console.log('[space] channel open for', this.name, id.slice(0, 8))
-
+      console.log('[space] channel open', this.name, id.slice(0, 8))
       this._peers.set(id, { mux, rpc })
       console.log('[space] peer added, total:', this._peers.size)
-
       this._emit('peer:connected', {
         spaceId: this.id, peerId: id, peers: this._peers.size
       })
-
-      this._syncWithPeer(id)
+      // only initiator syncs — avoids both sides requesting at same time
+      if (isInitiator) this._syncWithPeer(id)
     })
 
     rpc.once('close', () => {
       if (!this._peers.has(id)) {
-        // closed before open — remote didn't have this space
-        console.log('[space] channel rejected (no matching space on remote):', this.name)
+        console.log('[space] channel closed before open (remote missing space):', this.name)
         return
       }
       console.log('[space] peer disconnected', this.name, id.slice(0, 8))
@@ -120,10 +116,6 @@ class Space {
       this._emit('peer:disconnected', {
         spaceId: this.id, peerId: id, peers: this._peers.size
       })
-    })
-
-    mux.stream.on('error', (err) => {
-      console.log('[space] conn error', id.slice(0, 8), err.message)
     })
   }
 
@@ -196,7 +188,6 @@ class Space {
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
         console.log('[space] change:', type, key, 'peers:', this._peers.size)
-
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
@@ -220,11 +211,9 @@ class Space {
               }
             }
           }
-
           this._emit('space:changed', {
             spaceId: this.id, type, key, peers: this._peers.size
           })
-
         } catch (err) {
           console.log('[space] watch error:', err.message)
         }

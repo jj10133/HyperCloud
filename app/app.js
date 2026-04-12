@@ -55,7 +55,7 @@ class Drift {
       if (topicHexes.length > 0) {
         for (const hex of topicHexes) {
           const space = this._topics.get(hex)
-          if (space) matched.push(space)
+          if (space) matched.push({ space, initiator: true })
         }
       }
 
@@ -63,11 +63,11 @@ class Drift {
         // responder side has no topics — give mux to ALL spaces
         // protomux-rpc will only open channels that the remote also opens
         console.log('[drift] no topics — giving mux to all spaces')
-        for (const space of this.spaces.values()) matched.push(space)
+        for (const space of this.spaces.values()) matched.push({ space, initiator: false })
       }
 
-      console.log('[drift] matched spaces:', matched.map(s => s.name))
-      for (const space of matched) space.addPeer(mux, info)
+      console.log('[drift] matched spaces:', matched.map(m => m.space.name))
+      for (const { space, initiator } of matched) space.addPeer(mux, info, initiator)
     })
 
     // load all spaces first WITHOUT joining swarm

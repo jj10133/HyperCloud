@@ -8,7 +8,6 @@ const fs         = require('bare-fs')
 const path       = require('bare-path')
 const store      = require('./store')
 
-// peer protocol commands
 const CMD_MANIFEST = 1
 const CMD_GET      = 2
 const CMD_PUT      = 3
@@ -26,7 +25,7 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map() // noiseKeyHex → rpc
+    this._peers  = new Map()
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
@@ -125,14 +124,14 @@ class Space {
     }
   }
 
-  // wrap bare-rpc request in a promise
-  _request (rpc, command, data) {
-    return new Promise((resolve, reject) => {
-      const req = rpc.request(command)
-      req.on('response', (res) => resolve(res.data))
-      req.on('error', reject)
-      req.send(data)
-    })
+  // correct bare-rpc API:
+  // rpc.request(cmd) → OutgoingRequest
+  // outgoing.send(data) → void (fires the request)
+  // outgoing.reply() → Promise<Buffer> (waits for response)
+  async _request (rpc, command, data) {
+    const outgoing = rpc.request(command)
+    outgoing.send(data)
+    return outgoing.reply()
   }
 
   async _syncWithPeer (peerId) {

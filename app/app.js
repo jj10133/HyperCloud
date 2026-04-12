@@ -2,7 +2,7 @@
 
 const Hyperswarm = require('hyperswarm')
 const crypto     = require('hypercore-crypto')
-const { spawn }   = require('bare-subprocess')
+const { spawn }  = require('bare-subprocess')
 const RPC        = require('bare-rpc')
 
 const store    = require('./store')
@@ -27,8 +27,8 @@ const {
 
 class Drift {
   constructor () {
-    // spaceId → Space
-    this.spaces = new Map()
+    this.spaces = new Map()  // id → Space
+    this._topics = new Map() // topicHex → Space
     this.swarm  = null
     this.rpc    = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
@@ -43,36 +43,37 @@ class Drift {
     this.swarm = new Hyperswarm()
     this.swarm.on('connection', (conn, info) => this._onConnection(conn, info))
 
-    // restore persisted spaces
     for (const saved of store.loadSpaces()) {
       await this._loadSpace(saved)
     }
 
-    this._emit(CMD_READY, {
-      spaces: this._spacesJSON()
-    })
+    this._emit(CMD_READY, { spaces: this._spacesJSON() })
   }
 
   // ── Connection routing ────────────────────────────────────────────────────
 
   _onConnection (conn, info) {
-    // figure out which space this connection belongs to
-    // by matching the swarm topic
-    const topic = info.topics && info.topics[0]
-    if (!topic) return
-
-    const topicHex = topic.toString('hex')
-    const space = this._spaceByTopic(topicHex)
-    if (!space) return
-
-    space.addPeer(conn, info)
-  }
-
-  _spaceByTopic (topicHex) {
-    for (const space of this.spaces.values()) {
-      if (space.topic().toString('hex') === topicHex) return space
+    // try info.topics first (initiator side always has this)
+    if (info.topics && info.topics.length > 0) {
+      for (const t of info.topics) {
+        const space = this._topics.get(t.toString('hex'))
+        if (space) { space.addPeer(conn, info); return }
+      }
     }
-    return null
+
+    // responder side — info.topics may be empty
+    // match by checking which topic this peer's key is associated with
+    // Hyperswarm exposes the topic via the discovery key on the peer info
+    if (info.discoveryKey) {
+      const space = this._topics.get(info.discoveryKey.toString('hex'))
+      if (space) { space.addPeer(conn, info); return }
+    }
+
+    // last resort — if only one space exists, assign to it
+    if (this.spaces.size === 1) {
+      const space = [...this.spaces.values()][0]
+      space.addPeer(conn, info)
+    }
   }
 
   // ── Space lifecycle ───────────────────────────────────────────────────────
@@ -80,28 +81,29 @@ class Drift {
   async _loadSpace (opts) {
     const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
     this.spaces.set(space.id, space)
+    this._topics.set(space.topic().toString('hex'), space)
 
-    this.swarm.join(space.topic(), { server: true, client: true })
+    const discovery = this.swarm.join(space.topic(), { server: true, client: true })
+    await discovery.flushed()
+
     space.startWatching()
-
     return space
   }
 
   async _createSpace (name) {
     const key = crypto.randomBytes(32)
     const id  = crypto.randomBytes(16).toString('hex')
-
     const opts = { id, name, key: key.toString('hex'), paused: false }
-    store.addSpace(opts)
 
+    store.addSpace(opts)
     return this._loadSpace(opts)
   }
 
   async _joinSpace (name, keyHex) {
     const id   = crypto.randomBytes(16).toString('hex')
     const opts = { id, name, key: keyHex, paused: false }
-    store.addSpace(opts)
 
+    store.addSpace(opts)
     return this._loadSpace(opts)
   }
 
@@ -109,21 +111,18 @@ class Drift {
     const space = this.spaces.get(id)
     if (!space) return
 
-    await space.destroy()
+    this._topics.delete(space.topic().toString('hex'))
     this.spaces.delete(id)
+    await space.destroy()
     store.removeSpace(id)
   }
 
   // ── Space events → Swift ──────────────────────────────────────────────────
 
   _onSpaceEvent (event, data) {
-    if (event === 'space:changed') {
-      this._emit(CMD_SPACE_CHANGED, data)
-    } else if (event === 'peer:connected') {
-      this._emit(CMD_PEER_CONNECTED, data)
-    } else if (event === 'peer:disconnected') {
-      this._emit(CMD_PEER_DISCONNECTED, data)
-    }
+    if (event === 'space:changed')      this._emit(CMD_SPACE_CHANGED, data)
+    else if (event === 'peer:connected')    this._emit(CMD_PEER_CONNECTED, data)
+    else if (event === 'peer:disconnected') this._emit(CMD_PEER_DISCONNECTED, data)
   }
 
   // ── Swift → JS requests ───────────────────────────────────────────────────
@@ -156,30 +155,34 @@ class Drift {
           .then(() => reply(null))
           .catch(err => reply(err))
 
-      case CMD_GET_SPACE_KEY:
+      case CMD_GET_SPACE_KEY: {
         const space = this.spaces.get(body.id)
         if (!space) return reply(new Error('space not found'))
         return reply(null, { key: space.key.toString('hex') })
+      }
 
-      case CMD_OPEN_FOLDER:
-        const s = this.spaces.get(body.id)
-        if (!s) return reply(new Error('space not found'))
-        spawn('open', [s._folder], { detached: true })
+      case CMD_OPEN_FOLDER: {
+        const space = this.spaces.get(body.id)
+        if (!space) return reply(new Error('space not found'))
+        spawn('open', [space._folder], { detached: true })
         return reply(null)
+      }
 
-      case CMD_PAUSE_SPACE:
-        const ps = this.spaces.get(body.id)
-        if (!ps) return reply(new Error('space not found'))
-        ps.pause()
+      case CMD_PAUSE_SPACE: {
+        const space = this.spaces.get(body.id)
+        if (!space) return reply(new Error('space not found'))
+        space.pause()
         store.saveSpaces([...this.spaces.values()].map(s => s.toJSON()))
         return reply(null)
+      }
 
-      case CMD_RESUME_SPACE:
-        const rs = this.spaces.get(body.id)
-        if (!rs) return reply(new Error('space not found'))
-        rs.resume()
+      case CMD_RESUME_SPACE: {
+        const space = this.spaces.get(body.id)
+        if (!space) return reply(new Error('space not found'))
+        space.resume()
         store.saveSpaces([...this.spaces.values()].map(s => s.toJSON()))
         return reply(null)
+      }
 
       default:
         return reply(new Error('unknown command'))
@@ -190,7 +193,7 @@ class Drift {
 
   _emit (command, data) {
     const payload = data ? Buffer.from(JSON.stringify(data)) : Buffer.alloc(0)
-    this.rpc.event(command).send(payload)
+    this.rpc.event(command, payload)
   }
 
   _spacesJSON () {
@@ -198,5 +201,4 @@ class Drift {
   }
 }
 
-// boot
 new Drift()

@@ -23,6 +23,7 @@
     "prettier-config-holepunch": "^2.0.0"
   },
   "dependencies": {
+    "bare-crypto": "^1.13.4",
     "bare-fs": "^4.7.0",
     "bare-os": "^3.8.7",
     "bare-path": "^3.0.0",

@@ -1,6 +1,7 @@
 'use strict'
 
 const Hyperswarm = require('hyperswarm')
+const Protomux   = require('protomux')
 const crypto     = require('hypercore-crypto')
 const { spawn }  = require('bare-subprocess')
 const RPC        = require('bare-rpc')
@@ -26,10 +27,9 @@ const {
 
 class Drift {
   constructor () {
-    this.spaces  = new Map()
-    this._topics = new Map()
-    this.swarm   = null
-    this.rpc     = new RPC(BareKit.IPC, (req) => this._onRequest(req))
+    this.spaces = new Map()
+    this.swarm  = null
+    this.rpc    = new RPC(BareKit.IPC, (req) => this._onRequest(req))
 
     this._init()
   }
@@ -41,77 +41,55 @@ class Drift {
     this.swarm = new Hyperswarm()
 
     this.swarm.on('connection', (conn, info) => {
-      const noiseKey   = info.publicKey.toString('hex')
-      const topics     = info.topics || []
-      const peerTopics = info.peer?.topics || []
+      console.log('[drift] connection', info.publicKey.toString('hex').slice(0, 8))
 
-      // combine all topic sources
-      const allTopics = [...new Set([
-        ...topics.map(t => t.toString('hex')),
-        ...peerTopics.map(t => t.toString('hex')),
-        ...(info.discoveryKey ? [info.discoveryKey.toString('hex')] : [])
-      ])]
-
-      console.log('[drift] connection noise:', noiseKey.slice(0, 8), 'all topics:', allTopics.map(t => t.slice(0, 8)))
+      // one mux per connection — all spaces share it
+      const mux = new Protomux(conn)
 
       conn.on('error', (err) => console.log('[drift] conn error:', err.message))
 
-      const isInitiator = topics.length > 0
-
-      // find matching space from any topic source
-      for (const hex of allTopics) {
-        const space = this._topics.get(hex)
-        if (space) {
-          console.log('[drift] routing to space:', space.name, isInitiator ? '(initiator)' : '(responder)')
-          space.addPeer(conn, info, isInitiator)
-          return
-        }
+      // attach every space to this mux
+      // protomux matches channels by protocol+id so only shared spaces open
+      for (const space of this.spaces.values()) {
+        space.attachMux(mux, info)
       }
-
-      console.log('[drift] no space found — known topics:', [...this._topics.keys()].map(k => k.slice(0, 8)))
     })
 
+    // register all spaces before joining swarm
     const saved = store.loadSpaces()
     console.log('[drift] loading', saved.length, 'saved spaces')
     for (const opts of saved) this._registerSpace(opts)
 
-    const discoveries = []
+    // join all topics at once
+    const flushes = []
     for (const space of this.spaces.values()) {
       const d = this.swarm.join(space.topic(), { server: true, client: true })
-      discoveries.push(d.flushed())
+      flushes.push(d.flushed())
       space.startWatching()
     }
-
-    await Promise.all(discoveries)
+    await Promise.all(flushes)
     console.log('[drift] all spaces joined swarm')
 
     await new Promise(resolve => setTimeout(resolve, 500))
-
-    const spacesJSON = this._spacesJSON()
-    console.log('[drift] ready, spaces:', spacesJSON.length)
-    this._emit(CMD_READY, { spaces: spacesJSON })
+    this._emit(CMD_READY, { spaces: this._spacesJSON() })
   }
 
   _registerSpace (opts) {
     console.log('[drift] registering space:', opts.name)
     const space = new Space(opts, (event, data) => this._onSpaceEvent(event, data))
     this.spaces.set(space.id, space)
-    this._topics.set(space.topic().toString('hex'), space)
-    console.log('[drift] registered topic', space.topic().toString('hex').slice(0, 8), 'for', opts.name)
     return space
   }
 
   async _loadSpace (opts) {
     const space = this._registerSpace(opts)
-    const discovery = this.swarm.join(space.topic(), { server: true, client: true })
-    await discovery.flushed()
-    console.log('[drift] swarm joined for', opts.name)
+    const d = this.swarm.join(space.topic(), { server: true, client: true })
+    await d.flushed()
     space.startWatching()
     return space
   }
 
   async _createSpace (name) {
-    console.log('[drift] creating space:', name)
     const key  = crypto.randomBytes(32)
     const id   = crypto.randomBytes(16).toString('hex')
     const opts = { id, name, key: key.toString('hex'), paused: false }
@@ -120,7 +98,6 @@ class Drift {
   }
 
   async _joinSpace (name, keyHex) {
-    console.log('[drift] joining space:', name)
     const id   = crypto.randomBytes(16).toString('hex')
     const opts = { id, name, key: keyHex, paused: false }
     store.addSpace(opts)
@@ -130,14 +107,12 @@ class Drift {
   async _deleteSpace (id) {
     const space = this.spaces.get(id)
     if (!space) return
-    this._topics.delete(space.topic().toString('hex'))
     this.spaces.delete(id)
     await space.destroy()
     store.removeSpace(id)
   }
 
   _onSpaceEvent (event, data) {
-    console.log('[drift] space event:', event)
     if (event === 'space:changed')          this._emit(CMD_SPACE_CHANGED, data)
     else if (event === 'peer:connected')    this._emit(CMD_PEER_CONNECTED, data)
     else if (event === 'peer:disconnected') this._emit(CMD_PEER_DISCONNECTED, data)
@@ -145,14 +120,11 @@ class Drift {
 
   _onRequest (req) {
     if (req.command === undefined) return
-    console.log('[drift] request command:', req.command)
+    console.log('[drift] request:', req.command)
 
     const body  = req.data ? JSON.parse(req.data.toString()) : {}
     const reply = (err, data) => {
-      if (err) {
-        console.log('[drift] reply error:', err.message)
-        return req.reply(Buffer.from(JSON.stringify({ error: err.message })))
-      }
+      if (err) return req.reply(Buffer.from(JSON.stringify({ error: err.message })))
       req.reply(Buffer.from(JSON.stringify(data || {})))
     }
 
@@ -205,7 +177,6 @@ class Drift {
       }
 
       default:
-        console.log('[drift] unknown command:', req.command)
         return reply(new Error('unknown command'))
     }
   }

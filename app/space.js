@@ -2,16 +2,18 @@
 
 const Localdrive = require('localdrive')
 const Localwatch = require('localwatch')
-const RPC        = require('bare-rpc')
+const Protomux   = require('protomux')
+const c          = require('compact-encoding')
 const crypto     = require('hypercore-crypto')
 const fs         = require('bare-fs')
 const path       = require('bare-path')
 const store      = require('./store')
 
-const CMD_MANIFEST = 1
-const CMD_GET      = 2
-const CMD_PUT      = 3
-const CMD_DEL      = 4
+const jsonEnc = {
+  preencode (state, v) { c.string.preencode(state, JSON.stringify(v)) },
+  encode    (state, v) { c.string.encode(state, JSON.stringify(v)) },
+  decode    (state)    { return JSON.parse(c.string.decode(state)) }
+}
 
 class Space {
   constructor (opts, emit) {
@@ -25,146 +27,128 @@ class Space {
     this._topic  = crypto.hash(this.key)
     this._local  = new Localdrive(this._folder)
     this._watch  = null
-    this._peers  = new Map()
+    this._peers  = new Map() // noiseKeyHex → { channel, msgs }
 
     console.log('[space] created:', this.name, 'folder:', this._folder)
   }
 
   topic () { return this._topic }
 
-  addPeer (conn, info, isInitiator) {
-    const id = info.publicKey.toString('hex')
+  attachMux (mux, info) {
+    const id     = info.publicKey.toString('hex')
+    const peerId = id.slice(0, 8)
+
     if (this._peers.has(id)) return
+    console.log('[space] attachMux', this.name, peerId)
 
-    console.log('[space] addPeer', this.name, id.slice(0, 8), isInitiator ? '(initiator)' : '(responder)')
+    const self = this
 
-    const rpc = new RPC(conn, (req) => this._onRequest(req))
+    // msgs object — populated after addMessage calls below
+    const msgs = {}
 
-    conn.on('close', () => {
-      console.log('[space] peer disconnected', this.name, id.slice(0, 8))
-      this._peers.delete(id)
-      this._emit('peer:disconnected', {
-        spaceId: this.id, peerId: id, peers: this._peers.size
-      })
+    const channel = mux.createChannel({
+      protocol: 'drift/space',
+      id:       this._topic,
+
+      async onopen () {
+        console.log('[space] channel open', self.name, peerId)
+        self._peers.set(id, { channel, msgs })
+        self._emit('peer:connected', {
+          spaceId: self.id, peerId: id, peers: self._peers.size
+        })
+
+        // both sides send manifest on open
+        const files = await self._buildManifest()
+        console.log('[space] sending manifest', files.length, 'files to', peerId)
+        msgs.manifest.send(files)
+      },
+
+      async onclose () {
+        console.log('[space] channel close', self.name, peerId)
+        self._peers.delete(id)
+        self._emit('peer:disconnected', {
+          spaceId: self.id, peerId: id, peers: self._peers.size
+        })
+      }
     })
 
-    conn.on('error', (err) => {
-      console.log('[space] conn error', id.slice(0, 8), err.message)
-    })
-
-    this._peers.set(id, rpc)
-    console.log('[space] peer added, total:', this._peers.size)
-
-    this._emit('peer:connected', {
-      spaceId: this.id, peerId: id, peers: this._peers.size
-    })
-
-    if (isInitiator) this._syncWithPeer(id)
-  }
-
-  async _onRequest (req) {
-    switch (req.command) {
-
-      case CMD_MANIFEST: {
-        const manifest = await this._buildManifest()
-        console.log('[space] sending manifest:', manifest.length, 'files')
-        req.reply(Buffer.from(JSON.stringify(manifest)))
-        break
-      }
-
-      case CMD_GET: {
-        const key = req.data.toString()
-        const abs = path.join(this._folder, key)
-        console.log('[space] peer GET', key)
-        try {
-          req.reply(await fs.promises.readFile(abs))
-        } catch {
-          req.reply(Buffer.alloc(0))
-        }
-        break
-      }
-
-      case CMD_PUT: {
-        const { key, data: b64 } = JSON.parse(req.data.toString())
-        const buf = Buffer.from(b64, 'base64')
-        const abs = path.join(this._folder, key)
-        console.log('[space] peer PUT', key, buf.length, 'bytes')
-        try {
-          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
-          await fs.promises.writeFile(abs, buf)
-          console.log('[space] wrote', key)
-          this._emit('space:changed', {
-            spaceId: this.id, type: 'update', key, peers: this._peers.size
-          })
-        } catch (err) {
-          console.log('[space] PUT failed', err.message)
-        }
-        req.reply(Buffer.alloc(0))
-        break
-      }
-
-      case CMD_DEL: {
-        const key = req.data.toString()
-        const abs = path.join(this._folder, key)
-        console.log('[space] peer DEL', key)
-        try {
-          await fs.promises.unlink(abs)
-          this._emit('space:changed', {
-            spaceId: this.id, type: 'delete', key, peers: this._peers.size
-          })
-        } catch (err) {
-          console.log('[space] DEL failed', err.message)
-        }
-        req.reply(Buffer.alloc(0))
-        break
-      }
-
-      default:
-        req.reply(Buffer.alloc(0))
+    if (!channel) {
+      console.log('[space] channel null', this.name, peerId)
+      return
     }
-  }
 
-  // correct bare-rpc API:
-  // rpc.request(cmd) → OutgoingRequest
-  // outgoing.send(data) → void (fires the request)
-  // outgoing.reply() → Promise<Buffer> (waits for response)
-  async _request (rpc, command, data) {
-    const outgoing = rpc.request(command)
-    outgoing.send(data)
-    return outgoing.reply()
-  }
+    // msg 0: manifest — [{ key, mtime, hash }]
+    msgs.manifest = channel.addMessage({
+      encoding: jsonEnc,
+      async onmessage (theirFiles) {
+        console.log('[space] got manifest', theirFiles.length, 'files from', peerId)
+        const myFiles = await self._buildManifest()
+        const myMap   = new Map(myFiles.map(f => [f.key, f]))
 
-  async _syncWithPeer (peerId) {
-    console.log('[space] syncing with', peerId.slice(0, 8))
-    const rpc = this._peers.get(peerId)
-    if (!rpc) { console.log('[space] peer gone'); return }
-
-    try {
-      const raw        = await this._request(rpc, CMD_MANIFEST, Buffer.alloc(0))
-      const theirFiles = JSON.parse(raw.toString())
-      console.log('[space] peer has', theirFiles.length, 'files')
-
-      const myManifest = await this._buildManifest()
-      const myMap      = new Map(myManifest.map(f => [f.key, f]))
-
-      for (const their of theirFiles) {
-        const mine = myMap.get(their.key)
-        if (!mine || their.mtime > mine.mtime) {
-          console.log('[space] pulling', their.key)
-          const data = await this._request(rpc, CMD_GET, Buffer.from(their.key))
-          if (data && data.length > 0) {
-            const abs = path.join(this._folder, their.key)
-            await fs.promises.mkdir(path.dirname(abs), { recursive: true })
-            await fs.promises.writeFile(abs, data)
-            console.log('[space] synced', their.key)
+        for (const their of theirFiles) {
+          const mine = myMap.get(their.key)
+          if (!mine || their.mtime > mine.mtime) {
+            // send a want for this file
+            console.log('[space] want', their.key, 'from', peerId)
+            msgs.want.send(their.key)
           }
         }
       }
+    })
 
-      console.log('[space] sync done')
-    } catch (err) {
-      console.log('[space] sync error:', err.message)
-    }
+    // msg 1: file data — { key, data (base64) }
+    msgs.file = channel.addMessage({
+      encoding: jsonEnc,
+      async onmessage ({ key, data: b64 }) {
+        const buf = Buffer.from(b64, 'base64')
+        const abs = path.join(self._folder, key)
+        console.log('[space] recv file', key, buf.length, 'bytes from', peerId)
+        try {
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+          await fs.promises.writeFile(abs, buf)
+          self._emit('space:changed', {
+            spaceId: self.id, type: 'update', key, peers: self._peers.size
+          })
+        } catch (err) {
+          console.log('[space] write failed', key, err.message)
+        }
+      }
+    })
+
+    // msg 2: delete
+    msgs.del = channel.addMessage({
+      encoding: c.string,
+      async onmessage (key) {
+        const abs = path.join(self._folder, key)
+        console.log('[space] recv del', key, 'from', peerId)
+        try {
+          await fs.promises.unlink(abs)
+          self._emit('space:changed', {
+            spaceId: self.id, type: 'delete', key, peers: self._peers.size
+          })
+        } catch (err) {
+          console.log('[space] del failed', key, err.message)
+        }
+      }
+    })
+
+    // msg 3: want — peer requests a file by key
+    msgs.want = channel.addMessage({
+      encoding: c.string,
+      async onmessage (key) {
+        console.log('[space] peer wants', key, 'from', peerId)
+        const abs = path.join(self._folder, key)
+        try {
+          const data = await fs.promises.readFile(abs)
+          msgs.file.send({ key, data: data.toString('base64') })
+          console.log('[space] sent', key, 'to', peerId)
+        } catch (err) {
+          console.log('[space] want failed', key, err.message)
+        }
+      }
+    })
+
+    channel.open()
   }
 
   async _buildManifest () {
@@ -202,36 +186,23 @@ class Space {
       for (const { type, filename } of diff) {
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
-        console.log('[space] change:', type, key, 'peers:', this._peers.size)
+        console.log('[space] local change:', type, key, 'peers:', this._peers.size)
 
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
-            for (const [id, rpc] of this._peers) {
-              try {
-                await this._request(rpc, CMD_PUT, Buffer.from(
-                  JSON.stringify({ key, data: data.toString('base64') })
-                ))
-                console.log('[space] pushed', key, 'to', id.slice(0, 8))
-              } catch (err) {
-                console.log('[space] push failed to', id.slice(0, 8), err.message)
-              }
+            for (const [, peer] of this._peers) {
+              peer.msgs.file.send({ key, data: data.toString('base64') })
             }
           } else if (type === 'delete') {
-            for (const [id, rpc] of this._peers) {
-              try {
-                await this._request(rpc, CMD_DEL, Buffer.from(key))
-                console.log('[space] del pushed to', id.slice(0, 8))
-              } catch (err) {
-                console.log('[space] del failed to', id.slice(0, 8), err.message)
-              }
+            for (const [, peer] of this._peers) {
+              peer.msgs.del.send(key)
             }
           }
 
           this._emit('space:changed', {
             spaceId: this.id, type, key, peers: this._peers.size
           })
-
         } catch (err) {
           console.log('[space] watch error:', err.message)
         }
@@ -259,6 +230,9 @@ class Space {
 
   async destroy () {
     this.stopWatching()
+    for (const [, peer] of this._peers) {
+      try { peer.channel.close() } catch {}
+    }
     this._peers.clear()
   }
 }

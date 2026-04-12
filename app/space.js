@@ -6,15 +6,7 @@ const RPC         = require('protomux-rpc')
 const crypto      = require('hypercore-crypto')
 const fs          = require('bare-fs')
 const path        = require('bare-path')
-const c           = require('compact-encoding')
 const store       = require('./store')
-
-const PEER_MANIFEST = 1
-const PEER_GET      = 2
-const PEER_PUT      = 3
-const PEER_DEL      = 4
-
-const enc = { requestEncoding: c.raw, responseEncoding: c.raw }
 
 class Space {
   constructor (opts, emit) {
@@ -41,17 +33,17 @@ class Space {
 
     console.log('[space] addPeer', this.name, id.slice(0, 8))
 
-    // use topic as channel id — unique per space so multiple spaces
-    // on same connection are properly multiplexed
-    const rpc = new RPC(conn, { id: this._topic })
+    const rpc = new RPC(conn, {
+      id: Buffer.from('drift/' + this.id)
+    })
 
-    rpc.respond(PEER_MANIFEST, enc, async () => {
+    rpc.respond('manifest', async () => {
       const manifest = await this._buildManifest()
       console.log('[space] sending manifest:', manifest.length, 'files')
       return Buffer.from(JSON.stringify(manifest))
     })
 
-    rpc.respond(PEER_GET, enc, async (key) => {
+    rpc.respond('get', async (key) => {
       const abs = path.join(this._folder, key.toString())
       console.log('[space] peer GET', key.toString())
       try {
@@ -62,7 +54,7 @@ class Space {
       }
     })
 
-    rpc.respond(PEER_PUT, enc, async (data) => {
+    rpc.respond('put', async (data) => {
       const { key, data: b64 } = JSON.parse(data.toString())
       const buf = Buffer.from(b64, 'base64')
       const abs = path.join(this._folder, key)
@@ -80,7 +72,7 @@ class Space {
       return Buffer.alloc(0)
     })
 
-    rpc.respond(PEER_DEL, enc, async (data) => {
+    rpc.respond('del', async (data) => {
       const key = data.toString()
       const abs = path.join(this._folder, key)
       console.log('[space] peer DEL', key)
@@ -123,7 +115,7 @@ class Space {
     if (!peer) { console.log('[space] peer gone'); return }
 
     try {
-      const raw        = await peer.rpc.request(PEER_MANIFEST, Buffer.alloc(0), enc)
+      const raw        = await peer.rpc.request('manifest', Buffer.alloc(0))
       const theirFiles = JSON.parse(raw.toString())
       console.log('[space] peer has', theirFiles.length, 'files')
 
@@ -134,7 +126,7 @@ class Space {
         const mine = myMap.get(their.key)
         if (!mine || their.mtime > mine.mtime) {
           console.log('[space] pulling', their.key)
-          const data = await peer.rpc.request(PEER_GET, Buffer.from(their.key), enc)
+          const data = await peer.rpc.request('get', Buffer.from(their.key))
           if (data && data.length > 0) {
             const abs = path.join(this._folder, their.key)
             await fs.promises.mkdir(path.dirname(abs), { recursive: true })
@@ -186,14 +178,15 @@ class Space {
         const rel = path.relative(this._folder, filename)
         const key = '/' + rel.split(path.sep).join('/')
         console.log('[space] change:', type, key, 'peers:', this._peers.size)
+
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
             for (const [id, peer] of this._peers) {
               try {
-                await peer.rpc.request(PEER_PUT, Buffer.from(
+                await peer.rpc.request('put', Buffer.from(
                   JSON.stringify({ key, data: data.toString('base64') })
-                ), enc)
+                ))
                 console.log('[space] pushed', key, 'to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] push failed to', id.slice(0, 8), err.message)
@@ -202,16 +195,18 @@ class Space {
           } else if (type === 'delete') {
             for (const [id, peer] of this._peers) {
               try {
-                await peer.rpc.request(PEER_DEL, Buffer.from(key), enc)
+                await peer.rpc.request('del', Buffer.from(key))
                 console.log('[space] del pushed to', id.slice(0, 8))
               } catch (err) {
                 console.log('[space] del failed to', id.slice(0, 8), err.message)
               }
             }
           }
+
           this._emit('space:changed', {
             spaceId: this.id, type, key, peers: this._peers.size
           })
+
         } catch (err) {
           console.log('[space] watch error:', err.message)
         }

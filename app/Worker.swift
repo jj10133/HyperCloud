@@ -5,7 +5,7 @@ final class Worker: ObservableObject {
 
     // MARK: - Published state
 
-    @Published var spaces:        [DriftSpace] = []
+    @Published var spaces:        [Space] = []
     @Published var ready:         Bool = false
     @Published var recentChanges: [(spaceId: String, key: String, type: String)] = []
 
@@ -48,7 +48,7 @@ final class Worker: ObservableObject {
                     return
                 }
                 if let res {
-                    let space = DriftSpace(from: res)
+                    let space = Space(from: res)
                     await MainActor.run {
                         self.spaces.append(space)
                         print("[worker] appended space, total: \(self.spaces.count)")
@@ -67,7 +67,7 @@ final class Worker: ObservableObject {
                 let res = try await bridge.request(Cmd.joinSpace, body: ["name": name, "key": key])
                 print("[worker] joinSpace response: \(String(describing: res))")
                 if let res {
-                    let space = DriftSpace(from: res)
+                    let space =     Space(from: res)
                     await MainActor.run {
                         self.spaces.append(space)
                         print("[worker] joined space appended, total: \(self.spaces.count)")

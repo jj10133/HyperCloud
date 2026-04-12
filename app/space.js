@@ -37,35 +37,34 @@ class Space {
 
   // ── Peers ─────────────────────────────────────────────────────────────────
 
-  addPeer (conn, info) {
-    const id = info.publicKey.toString('hex')
-    if (this._peers.has(id)) return
+    addPeer (conn, info) {
+      const id = info.publicKey.toString('hex')
+      if (this._peers.has(id)) return
 
-    // open bare-rpc directly on the hyperswarm stream
-    const rpc = new RPC(conn, (req) => this._onPeerRequest(req))
+      const rpc = new RPC(conn, (req) => this._onPeerRequest(req))
 
-    rpc.on('close', () => {
-      this._peers.delete(id)
-      this._emit('peer:disconnected', {
+      // listen on conn not rpc
+      conn.on('close', () => {
+        this._peers.delete(id)
+        this._emit('peer:disconnected', {
+          spaceId: this.id,
+          peerId:  id,
+          peers:   this._peers.size
+        })
+      })
+
+      conn.on('error', () => {})
+
+      this._peers.set(id, { conn, rpc })
+
+      this._emit('peer:connected', {
         spaceId: this.id,
         peerId:  id,
         peers:   this._peers.size
       })
-    })
 
-    conn.on('error', () => {})
-
-    this._peers.set(id, { conn, rpc })
-
-    this._emit('peer:connected', {
-      spaceId: this.id,
-      peerId:  id,
-      peers:   this._peers.size
-    })
-
-    // sync with this peer immediately
-    this._syncWithPeer(id)
-  }
+      this._syncWithPeer(id)
+    }
 
   peerCount () {
     return this._peers.size

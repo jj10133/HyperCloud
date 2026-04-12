@@ -1,13 +1,18 @@
 'use strict'
 
-const Localdrive       = require('localdrive')
-const DistributedDrive = require('distributed-drive')
-const Localwatch       = require('localwatch')
-const Protomux         = require('protomux')
-const crypto           = require('hypercore-crypto')
-const fs               = require('bare-fs')
-const path             = require('bare-path')
-const store            = require('./store')
+const Localdrive = require('localdrive')
+const Localwatch = require('localwatch')
+const RPC        = require('bare-rpc')
+const crypto     = require('hypercore-crypto')
+const fs         = require('bare-fs')
+const path       = require('bare-path')
+const store      = require('./store')
+
+// ── commands over peer RPC ────────────────────────────────────────────────────
+const PEER_MANIFEST = 1  // request: send me your file list
+const PEER_GET      = 2  // request: send me this file's bytes
+const PEER_PUT      = 3  // event:   I changed this file
+const PEER_DEL      = 4  // event:   I deleted this file
 
 class Space {
   constructor (opts, emit) {
@@ -19,11 +24,9 @@ class Space {
     this._emit   = emit
     this._folder = store.ensureSpaceFolder(this.name)
     this._topic  = crypto.hash(this.key)
-
     this._local  = new Localdrive(this._folder)
-    this._drive  = new DistributedDrive(this._local)
     this._watch  = null
-    this._peers  = new Map() // noiseKeyHex → conn
+    this._peers  = new Map() // id → { conn, rpc }
   }
 
   // ── Topic ─────────────────────────────────────────────────────────────────
@@ -38,13 +41,10 @@ class Space {
     const id = info.publicKey.toString('hex')
     if (this._peers.has(id)) return
 
-    this._peers.set(id, conn)
+    // open bare-rpc directly on the hyperswarm stream
+    const rpc = new RPC(conn, (req) => this._onPeerRequest(req))
 
-    // hyperswarm gives a raw stream — protomux-rpc needs a Protomux instance
-    const mux = new Protomux(conn)
-    this._drive.addPeer(mux)
-
-    conn.on('close', () => {
+    rpc.on('close', () => {
       this._peers.delete(id)
       this._emit('peer:disconnected', {
         spaceId: this.id,
@@ -53,7 +53,9 @@ class Space {
       })
     })
 
-    conn.on('error', () => {}) // prevent unhandled crashes
+    conn.on('error', () => {})
+
+    this._peers.set(id, { conn, rpc })
 
     this._emit('peer:connected', {
       spaceId: this.id,
@@ -61,34 +63,126 @@ class Space {
       peers:   this._peers.size
     })
 
-    // pull anything newer from the new peer
-    this._initialSync()
+    // sync with this peer immediately
+    this._syncWithPeer(id)
   }
 
   peerCount () {
     return this._peers.size
   }
 
-  // ── Initial sync ──────────────────────────────────────────────────────────
+  // ── Peer RPC handlers (incoming from remote peer) ─────────────────────────
 
-  async _initialSync () {
+  async _onPeerRequest (req) {
+    switch (req.command) {
+
+      case PEER_MANIFEST: {
+        // peer wants our file list
+        const manifest = await this._buildManifest()
+        req.reply(Buffer.from(JSON.stringify(manifest)))
+        break
+      }
+
+      case PEER_GET: {
+        // peer wants a specific file
+        const key  = req.data.toString()
+        const abs  = path.join(this._folder, key)
+        try {
+          const data = await fs.promises.readFile(abs)
+          req.reply(data)
+        } catch {
+          req.reply(Buffer.alloc(0))
+        }
+        break
+      }
+
+      case PEER_PUT: {
+        // peer pushed a file change to us
+        const { key, data: b64 } = JSON.parse(req.data.toString())
+        const data = Buffer.from(b64, 'base64')
+        const abs  = path.join(this._folder, key)
+        try {
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+          await fs.promises.writeFile(abs, data)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'update', key, peers: this._peers.size
+          })
+        } catch {}
+        req.reply(Buffer.alloc(0))
+        break
+      }
+
+      case PEER_DEL: {
+        // peer deleted a file
+        const key = req.data.toString()
+        const abs = path.join(this._folder, key)
+        try {
+          await fs.promises.unlink(abs)
+          this._emit('space:changed', {
+            spaceId: this.id, type: 'delete', key, peers: this._peers.size
+          })
+        } catch {}
+        req.reply(Buffer.alloc(0))
+        break
+      }
+
+      default:
+        req.reply(Buffer.alloc(0))
+    }
+  }
+
+  // ── Initial sync with a peer ──────────────────────────────────────────────
+
+  async _syncWithPeer (peerId) {
+    const peer = this._peers.get(peerId)
+    if (!peer) return
+
     try {
-      for await (const { key, mtime } of this._drive.listAll('/')) {
-        const localEntry = await this._local.entry(key)
-        const localMtime = localEntry?.value?.metadata?.mtime || 0
+      // get their manifest
+      const raw          = await peer.rpc.request(PEER_MANIFEST, Buffer.alloc(0))
+      const theirFiles   = JSON.parse(raw.toString()) // [{ key, mtime, hash }]
+      const myManifest   = await this._buildManifest()
+      const myMap        = new Map(myManifest.map(f => [f.key, f]))
 
-        if (mtime > localMtime) {
-          const data = await this._drive.get(key)
-          if (data) {
-            const dest = path.join(this._folder, key)
-            await fs.promises.mkdir(path.dirname(dest), { recursive: true })
-            await fs.promises.writeFile(dest, data)
+      for (const their of theirFiles) {
+        const mine = myMap.get(their.key)
+
+        // pull if we don't have it or theirs is newer
+        if (!mine || their.mtime > mine.mtime) {
+          const data = await peer.rpc.request(
+            PEER_GET,
+            Buffer.from(their.key)
+          )
+          if (data && data.length > 0) {
+            const abs = path.join(this._folder, their.key)
+            await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+            await fs.promises.writeFile(abs, data)
           }
         }
       }
     } catch {
-      // peer may disconnect mid-sync, that is fine
+      // peer disconnected mid-sync, fine
     }
+  }
+
+  // ── Manifest builder ──────────────────────────────────────────────────────
+
+  async _buildManifest () {
+    const files = []
+    try {
+      for await (const entry of this._local.list('/')) {
+        const abs  = path.join(this._folder, entry.key)
+        try {
+          const stat = await fs.promises.stat(abs)
+          files.push({
+            key:   entry.key,
+            mtime: stat.mtimeMs,
+            hash:  entry.value?.blob?.hash?.toString('hex') || ''
+          })
+        } catch {}
+      }
+    } catch {}
+    return files
   }
 
   // ── Watch ─────────────────────────────────────────────────────────────────
@@ -114,20 +208,32 @@ class Space {
         try {
           if (type === 'update') {
             const data = await fs.promises.readFile(filename)
-            await this._drive.put(key, data)
+
+            // push to all connected peers
+            for (const [, peer] of this._peers) {
+              try {
+                await peer.rpc.request(PEER_PUT, Buffer.from(
+                  JSON.stringify({ key, data: data.toString('base64') })
+                ))
+              } catch {}
+            }
+
           } else if (type === 'delete') {
-            await this._drive.del(key)
+            for (const [, peer] of this._peers) {
+              try {
+                await peer.rpc.request(PEER_DEL, Buffer.from(key))
+              } catch {}
+            }
           }
 
           this._emit('space:changed', {
             spaceId: this.id,
             type,
             key,
-            peers:   this._peers.size
+            peers: this._peers.size
           })
-        } catch {
-          // ignore transient errors
-        }
+
+        } catch {}
       }
     }
   }
@@ -166,8 +272,10 @@ class Space {
 
   async destroy () {
     this.stopWatching()
+    for (const [, peer] of this._peers) {
+      try { peer.rpc.destroy() } catch {}
+    }
     this._peers.clear()
-    await this._drive.close()
   }
 }
 

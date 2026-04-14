@@ -15,8 +15,8 @@ struct App: SwiftUI.App {
             Label("HyperCloud", systemImage: worker.ready ? "externaldrive.fill.badge.icloud" : "clock")
         }
         .menuBarExtraStyle(.window)
-        .onChange(of: scenePhase) { oldPhase, newPhase in
-            switch newPhase {
+        .onChange(of: scenePhase) { phase in
+            switch phase {
             case .background: worker.suspend()
             case .active:     worker.resume()
             default: break

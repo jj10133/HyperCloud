@@ -48,6 +48,8 @@ targets:
           VALIDATE_PRODUCT: YES
     info:
       path: app/Info.plist
+      properties:
+        NSLocalNetworkUsageDescription: "We need access to your local network to connect to nearby devices."
     entitlements:
       path: app/App.entitlements
       properties:

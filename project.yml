@@ -30,7 +30,7 @@ targets:
         VALID_ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
         MACOSX_DEPLOYMENT_TARGET: "13.0"
-
+        ENABLE_HARDENED_RUNTIME: YES
       configs:
         Debug:
           CODE_SIGN_IDENTITY: '-'

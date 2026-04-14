@@ -11,14 +11,26 @@ packages:
 targets:
   App:
     type: application
-    supportedDestinations: [iOS, macOS]
+    supportedDestinations: [macOS]
     deploymentTarget:
-      iOS: "16.0"
-      macOS: "11.0"
+      # iOS: '16.0'
+      macOS: '13.0'
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios
+        PRODUCT_NAME: HyperCloud
+        PRODUCT_BUNDLE_IDENTIFIER: to.foss.hypercloud
+        MARKETING_VERSION: '1.0.0'
+        CURRENT_PROJECT_VERSION: '1'
+        INFOPLIST_KEY_CFBundleDisplayName: 'HyperCloud'
+        INFOPLIST_KEY_LSApplicationCategoryType: 'public.app-category.productivity'
         SWIFT_VERSION: 5.0
+        ASSETCATALOG_COMPILER_APPICON_NAME: 'HyperCloud'
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        ARCHS: arm64
+        VALID_ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+
       configs:
         Debug:
           CODE_SIGN_IDENTITY: '-'
@@ -28,6 +40,7 @@ targets:
           VALIDATE_PRODUCT: NO
           VALIDATE_WORKSPACE: NO
           OTHER_CODE_SIGN_FLAGS: '--deep --no-strict'
+          CODE_SIGN_ENTITLEMENTS: ''
         Release:
           CODE_SIGN_STYLE: Automatic
           CODE_SIGN_IDENTITY: 'Apple Development'
@@ -38,9 +51,6 @@ targets:
     entitlements:
       path: app/App.entitlements
       properties:
-        # aps-environment: development
-        # com.apple.security.application-groups:
-          # - group.to.holepunch.bare.ios
         com.apple.security.cs.allow-jit: true
     dependencies:
       - framework: app/frameworks/BareKit.xcframework
@@ -50,6 +60,7 @@ targets:
     sources:
       - path: app/App.swift
       - path: app/app.js
+      - path: app/HyperCloud.icon
       - path: app/app.bundle
         optional: true
 
@@ -66,7 +77,6 @@ targets:
       - path: app/IPCBridge.swift
       - path: app/Space.swift
       - path: app/SpacesListView.swift
-
 
     scheme:
       preActions:
@@ -88,5 +98,3 @@ targets:
               --base ${PWD} \
               --out ${PWD}/app/app.bundle \
               ${PWD}/app/app.js
-
-

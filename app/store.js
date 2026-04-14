@@ -4,9 +4,9 @@ const fs   = require('bare-fs')
 const path = require('bare-path')
 const os   = require('bare-os')
 
-const DRIFT_DIR   = path.join(os.homedir(), '.drift')
+const DRIFT_DIR   = path.join(os.homedir(), '.hypercloud')
 const SPACES_FILE = path.join(DRIFT_DIR, 'spaces.json')
-const SYNC_DIR    = path.join(os.homedir(), 'Drift')
+const SYNC_DIR    = path.join(os.homedir(), 'HyperCloud')
 
 function init () {
   console.log('[store] DRIFT_DIR:', DRIFT_DIR)
